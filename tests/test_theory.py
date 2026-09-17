@@ -235,6 +235,19 @@ def test_integrity_finding_is_against_and_names_the_theory(tmp_path: Path) -> No
     assert f is not None and f.direction is Direction.AGAINST and "theory_01" in f.claim
 
 
+def test_the_seal_keeps_a_copy_and_can_restore_it(tmp_path: Path) -> None:
+    t = theory(tmp_path)
+    t.seal()
+    raw = json.loads(t.note_path.read_text())
+    raw["prediction"] = "Rewritten after seeing the numbers, which is the point."
+    t.note_path.write_text(json.dumps(raw))
+    f = t.integrity_finding()
+    assert f is not None and "['prediction']" in f.evidence
+    assert t.sealed_note().prediction == NOTE["prediction"]
+    t.restore_sealed()
+    assert t.verify() == t.seal_digest() and t.integrity_finding() is None
+
+
 def test_an_unsealed_measured_theory_is_a_finding_too(tmp_path: Path) -> None:
     t = theory(tmp_path)
     f = t.integrity_finding()

@@ -384,10 +384,25 @@ class Theory:
         if self.sealed:
             return self.seal_digest()  # type: ignore[return-value]
         digest = note.digest()
+        # The sealed note is copied into the seal: the hash detects a rewording,
+        # the copy shows what was sealed and lets it be restored.
         self.seal_path.write_text(json.dumps({
-            "digest": digest, "version": self.version, "sealed_at": _now()}, indent=2),
+            "digest": digest, "version": self.version, "sealed_at": _now(),
+            "note": note.model_dump(mode="json")}, indent=2, ensure_ascii=False),
             encoding="utf-8")
         return digest
+
+    def sealed_note(self) -> TheoryNote:
+        if not self.sealed:
+            raise NotSealed("no sealed note")
+        return parse_note(json.loads(self.seal_path.read_text(encoding="utf-8"))["note"])
+
+    def restore_sealed(self) -> TheoryNote:
+        """Put the sealed note back in place of a reworded one."""
+        note = self.sealed_note()
+        self.note_path.write_text(json.dumps(note.model_dump(mode="json"), indent=2,
+                                             ensure_ascii=False), encoding="utf-8")
+        return note
 
     def verify(self) -> str:
         """The note still matches its seal. Raises TamperedNote otherwise."""
@@ -433,9 +448,11 @@ class Theory:
         except NotSealed:
             return Finding(Direction.AGAINST, f"{self.dir.name}: measured without a seal",
                            "no seal.json next to the note")
-        except TamperedNote as exc:
+        except TamperedNote:
+            sealed, now = self.sealed_note().model_dump(), self.note().model_dump()
+            changed = sorted(k for k in now if now[k] != sealed.get(k))
             return Finding(Direction.AGAINST, f"{self.dir.name}: note reworded after its seal",
-                           str(exc))
+                           f"field(s) changed since the seal: {changed}")
         return None
 
     def summary(self) -> dict:

@@ -4,47 +4,60 @@
 # Paths are relative to --base; module references are imported from there.
 
 briefs:
-  examples/dataset_audit/briefs/proposer.md:
+  examples/dataset_audit/briefs/researcher.md:
     name_all:
       - items: examples.dataset_audit.data:COLUMNS
         label: columns
       - items: examples.dataset_audit.rules:OPERATORS
         label: operators
+      - items: examples.dataset_audit.metrics:METRICS
+        label: metric functions
+      - items: examples.dataset_audit.metrics:METRICS
+        label: metric functions
     state_count:
       - value: examples.dataset_audit.data:COLUMNS
         noun: columns
       - value: examples.dataset_audit.rules:OPERATORS
         noun: operators
+      - value: examples.dataset_audit.metrics:METRICS
+        noun: functions
+      - value: 4
+        noun: cards
     quote:
       - value: examples/dataset_audit/config.yaml#budget.costs.in_scope
-        prefix: "in-scope rule costs "
+        prefix: "in-scope theory costs "
       - value: examples/dataset_audit/config.yaml#budget.costs.adjacent
         prefix: "adjacent one costs "
       - value: examples/dataset_audit/config.yaml#budget.costs.off_topic
         prefix: "off-topic one costs "
-      - value: examples/dataset_audit/config.yaml#acceptance.precision_min
-        prefix: "precision of at least "
-      - value: examples/dataset_audit/config.yaml#acceptance.flagged_min
-        prefix: "at least "
-        suffix: " flagged rows"
+      - value: examples/dataset_audit/config.yaml#budget.total
+        prefix: "budget of "
     forbid:
       - "held-out rows"
       - "four operators"
+      - "two functions"
     require:
       - "in-sample"
+      - "never reword a sealed note"
       - "never write anywhere else"
+      - "confirmed"
+      - "refuted"
+      - "undecided"
 
   examples/dataset_audit/briefs/auditor.md:
     name_all:
-      - items: examples.dataset_audit.data:COLUMNS
-        label: columns
-      - items: examples.dataset_audit.rules:OPERATORS
-        label: operators
+      - items: examples.dataset_audit.metrics:METRICS
+        label: metric functions
     state_count:
+      - value: examples.dataset_audit.data:COLUMNS
+        noun: columns
       - value: examples.dataset_audit.rules:OPERATORS
         noun: operators
+      - value: examples.dataset_audit.metrics:METRICS
+        noun: functions
     require:
       - "GO or NO_GO, nothing else"
+      - "before it is sealed"
 
   examples/dataset_audit/briefs/reviewer.md:
     quote:
@@ -54,3 +67,9 @@ briefs:
     require:
       - "never how"
       - "PASS, RETRY, ESCALATE"
+      - "reworded after its seal"
+
+status:
+  - glob: examples/dataset_audit/library/*.md
+    markers: ["status: usable", "status: needs_extension", "status: out_of_data"]
+    except: ["examples/dataset_audit/library/INDEX.md"]

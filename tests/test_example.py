@@ -1,4 +1,4 @@
-"""The end-to-end example runs, and every mechanism fires exactly as documented."""
+"""The end-to-end example runs, and every mechanism of the research loop fires as documented."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 
 from agent_harness.prompt_tests import run_checks
+from agent_harness.research.library import Library
 from examples.dataset_audit import run as example
 from examples.dataset_audit.data import N_ANOMALIES, rows
 
@@ -20,31 +21,50 @@ def test_the_table_has_nine_labelled_anomalies() -> None:
     assert len({r["id"] for r in rows()}) == 40
 
 
+def test_the_library_index_is_current() -> None:
+    lib = Library(ROOT / "examples" / "dataset_audit" / "library")
+    assert lib.counts() == {"usable": 2, "needs_extension": 1, "out_of_data": 1}
+    assert lib.index_is_current(), "run: python -m agent_harness.research.library index --dir examples/dataset_audit/library"
+
+
 def test_the_run_matches_its_documentation(tmp_path: Path) -> None:
     s = example.run(tmp_path, run_id="t", quiet=True)
 
-    assert s["verdict"] == "max_iterations" and s["iterations"] == 7
-    assert s["accepted"] == ["rule_01", "rule_02", "rule_04", "rule_07"]
-    assert s["rejected"] == ["rule_06"]
-    assert s["best_id"] == "rule_07" and s["best"] == 0.6154
+    assert s["verdict"] == "max_iterations" and s["iterations"] == 8
+    assert s["measured"] == ["t-theory_01", "t-theory_02", "t-theory_04", "t-theory_07"]
+    assert s["verdicts"] == {"t-theory_01": "refuted", "t-theory_02": "confirmed",
+                             "t-theory_04": "undecided", "t-theory_07": "confirmed"}
 
-    # iteration 3: refused before measurement, the track was not served yet
-    assert s["refused"] == ["rule_03"]
-    # iteration 5: the write outside the jurisdiction was restored
+    # refused before any spending, each for its own reason
+    assert s["refused"] == {"t-theory_03": "ValueError",          # budget: the age track has no theory yet
+                            "t-theory_05": "CitationRefused",     # a card the library does not have
+                            "t-theory_06": "AlreadyRefuted"}      # the same formulation as theory 1
+    # iteration 8: the write outside the jurisdiction was restored
     assert s["violations"] == ["state.json"]
     state = json.loads((tmp_path / "t" / "state.json").read_text())
-    assert state["phases"]["rules"]["verdict"] == "max_iterations", "state.json is the machine's"
+    assert state["phases"]["theories"]["verdict"] == "max_iterations", "state.json is the machine's"
 
-    # budget: 1 + 1 + 1 + 3 + 2, five trials measured
-    assert s["budget_spent"] == 8 and s["budget_trials"] == 5
+    # budget: 1 + 1 + 1 + 2, four theories measured
+    assert s["budget_spent"] == 5 and s["budget_prior"] == 0
 
-    # boundary: one overstated claim, one retry, then a pass
+    # boundary: theory 7 was reworded after its seal; caught, restored, then PASS
     assert s["review_decisions"] == ["RETRY", "PASS"] and s["retries"] == 1
     assert s["ledger_counts"] == {"gate": 1, "run": 1, "report": 1, "retry": 1, "escalate": 0}
-    assert s["ledger_lines"] == 4
+    t7 = tmp_path / "t" / "theories" / "t-theory_07"
+    assert json.loads((t7 / "note.json").read_text())["prediction"].startswith("The rule age in [1, 120]")
 
-    rationale = (tmp_path / "t" / "items" / "rule_07" / "rationale.md").read_text()
-    assert "claimed_recall: 0.4444" in rationale, "the proposer restated its claim"
+    # knowledge: the four measured theories, the refutation saying what exactly was refuted
+    assert s["knowledge_entries"] == 4
+    entries = [json.loads(l) for l in (tmp_path / "knowledge" / f"{example.dataset_id()}.jsonl").read_text().splitlines()]
+    assert entries[0]["verdict"] == "refuted" and "2023 cut-off" in entries[0]["refuted_exactly"]
+    assert any("predate 2023" in l for l in s["lessons"])
+
+    # the idea, frozen during the run and rewritten on the verdicts
+    assert (tmp_path / "t" / "idea.frozen.json").exists()
+    rewritten = (tmp_path / "t" / "idea_rewritten.md").read_text()
+    assert "rewritten on 4 measured theories" in rewritten
+    assert "**refuted** — t-theory_01" in rewritten and "**confirmed** — t-theory_07" in rewritten
+    assert "## Track `signup_date`" in rewritten and "**confirmed** — t-theory_02" in rewritten
 
 
 def test_the_run_is_deterministic(tmp_path: Path) -> None:
@@ -53,22 +73,25 @@ def test_the_run_is_deterministic(tmp_path: Path) -> None:
     assert a["trace"] == b["trace"]
 
 
-def test_a_second_run_finds_the_budget_partly_spent(tmp_path: Path) -> None:
+def test_a_second_run_learns_from_the_first(tmp_path: Path) -> None:
     example.run(tmp_path, run_id="first", quiet=True)
-    saved = json.loads((tmp_path / "budget" / f"{example.dataset_id()}.json").read_text())
-    assert saved["spent"] == {"_": 8}
-    second = example.run(tmp_path, run_id="second", quiet=True)
-    # 4 trials left: the off-topic and adjacent proposals are refused for budget, not drift
-    assert second["refused"] == ["rule_03", "rule_06", "rule_07"]
-    assert all("budget exhausted" in line for line in second["trace"] if "refused before" in line)
-    assert second["budget_spent"] == 3
-    assert any("11/12 on subject" in line and "across runs" in line for line in second["trace"])
-    # the ledger persisted too: both runs are on it
-    assert second["ledger_lines"] == 7 and second["ledger_counts"]["retry"] == 1
+    s = example.run(tmp_path, run_id="second", quiet=True)
+    # the budget is shared across runs on the same table
+    assert s["budget_prior"] == 5 and s["budget_spent"] == 4
+    # theory 1 is refused as already refuted, before any spending
+    assert s["refused"]["second-theory_01"] == "AlreadyRefuted"
+    # the confirmed and undecided theories may be measured again; they build on their history
+    assert s["measured"] == ["second-theory_02", "second-theory_04", "second-theory_07"]
+    entries = [json.loads(l) for l in (tmp_path / "knowledge" / f"{example.dataset_id()}.jsonl").read_text().splitlines()]
+    second_04 = next(e for e in entries if e["theory_id"] == "second-theory_04")
+    assert second_04["builds_on"] == ["first-theory_04", "first-theory_07"]
+    assert s["knowledge_entries"] == 7
+    assert any("already known" in l and "4 theories" in l for l in
+               (tmp_path / "ledger.md").read_text().splitlines())
 
 
 def test_the_briefs_tell_the_truth() -> None:
     spec = yaml.safe_load((ROOT / "examples" / "dataset_audit" / "prompt_checks.yaml").read_text())
     report = run_checks(spec, ROOT)
     assert report.failures == []
-    assert report.checked >= 10
+    assert report.checked >= 20
