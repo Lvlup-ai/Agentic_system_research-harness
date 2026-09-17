@@ -3,11 +3,11 @@
 Why this module exists
 ----------------------
 A researcher agent that sees the numbers before writing what it expected will
-write what it saw. The original pipeline learnt this the expensive way: eight
-"theories" that were parametric variants of one idea, a criterion of refutation
-that fired on noise a third of the time, and theories quietly reworded after
-the measurement to fit the result. The fix was procedural, and this module
-makes it mechanical:
+write what it saw. The original pipeline learnt this the expensive way:
+"theories" that were parametric variants of one idea, a criterion of
+refutation that fired far too often on pure noise, and theories quietly
+reworded after the measurement to fit the result. The fix was procedural, and
+this module makes it mechanical:
 
 1. **The note comes first.** Mechanism, quantified prediction, what would
    prove it wrong, what is measured and why that tests *this* mechanism. No

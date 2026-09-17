@@ -86,8 +86,8 @@ def test_a_note_without_zones_is_malformed() -> None:
 
 
 def test_an_unknown_field_is_malformed() -> None:
-    with pytest.raises(MalformedNote, match="expected_pnl"):
-        parse_note({**NOTE, "expected_pnl": 12})
+    with pytest.raises(MalformedNote, match="expected_gain"):
+        parse_note({**NOTE, "expected_gain": 12})
 
 
 def test_two_zones_on_one_metric_are_refused() -> None:

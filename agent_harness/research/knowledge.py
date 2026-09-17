@@ -5,9 +5,9 @@ Why this module exists
 A researcher that starts every run from the idea alone re-pays what earlier
 runs already paid. The original pipeline kept a section called "what
 experience established, and no run must pay for again", and its researcher
-rewrote the idea after 38 trials with a number behind every claim. That
-memory was a document; this module makes it a store the harness reads and
-enforces:
+rewrote the starting idea after dozens of trials with a number behind every
+claim. That memory was a document; this module makes it a store the harness
+reads and enforces:
 
 * every measured theory is **recorded** with its verdict, its sealed digest,
   and, when refuted, *what exactly* was refuted (often a formulation, not the
