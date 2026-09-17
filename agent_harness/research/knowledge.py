@@ -20,8 +20,34 @@ enforces before every new trial:
 * **lessons** are short statements a run established; they are what the
   briefs must carry, and ``prompt_tests`` can check that they do.
 
-The store is one JSON-lines file per subject, append-only. A line is never
-edited: a later line may supersede an earlier one, and both stay.
+How to use it
+-------------
+Before a researcher writes a note, give it what is known; before a trial is
+spent, check the note; after the verdict, record it::
+
+    knowledge = Knowledge(store=Path("knowledge"), subject="dataset_a")
+    prompt_context = knowledge.briefing(track="email")   # goes into the researcher's prompt
+    knowledge.check_note(note)          # AlreadyRefuted / IgnoresHistory, or silence
+    ...seal, measure...
+    knowledge.record(theory, run_id="run_3",
+                     refuted_exactly="the 2023 cut-off, not the form hypothesis",
+                     lessons=["Dates alone do not explain malformed rows."])
+
+Store format
+------------
+One JSON-lines file per subject, ``<store>/<subject>.jsonl``, append-only: a
+line is never edited, a later line may supersede an earlier one, and both
+stay. Each line is an ``Entry``: the theory id and run, its track, the seal
+digest, the formulation digest, the mechanism and prediction as written, the
+verdict with the decision of every zone, what exactly was refuted, the
+lessons, the cards cited and the theories built on.
+
+From a shell::
+
+    python -m agent_harness.research.knowledge briefing --store knowledge --subject dataset_a --track email
+    python -m agent_harness.research.knowledge check    --store knowledge --subject dataset_a --note note.json
+    python -m agent_harness.research.knowledge record   --store knowledge --subject dataset_a \
+        --theory-dir runs/r3/theories/theory_04 --run-id r3 --refuted-exactly "..." --lesson "..."
 """
 
 from __future__ import annotations

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -207,3 +209,51 @@ def test_summary_lists_compartments() -> None:
     b = Budget(total=6, compartments={"a": 3, "b": 3})
     b.consume("x", "in_scope", compartment="a")
     assert b.summary().endswith("· a 1/3, b 0/3")
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
+def _cli(*args: str) -> tuple[int, dict]:
+    proc = subprocess.run([sys.executable, "-m", "agent_harness.budget", *args],
+                          capture_output=True, text=True)
+    return proc.returncode, json.loads(proc.stdout)
+
+
+def test_cli_drives_a_budget_across_processes(tmp_path: Path) -> None:
+    run = str(tmp_path / "runs" / "r1" / "budget.json")
+    store = str(tmp_path / "budget")
+    code, out = _cli("init", "--run-file", run, "--store", store, "--subject", "s",
+                     "--reason", "first_pass", "--total", "5", "--track", "email")
+    assert code == 0 and out["remaining"] == 5
+    code, out = _cli("check", "--run-file", run, "--distance", "off_topic")
+    assert code == 2 and "email" in out["reason"]
+    code, out = _cli("consume", "--run-file", run, "--name", "t1", "--distance", "in_scope",
+                     "--track", "email", "--accepted", "true")
+    assert code == 0 and out["remaining"] == 4 and out["trial"]["n"] == 1
+    code, out = _cli("check", "--run-file", run, "--distance", "off_topic")
+    assert code == 0
+    code, out = _cli("consume", "--run-file", run, "--name", "t2", "--distance", "off_topic")
+    assert code == 0 and out["remaining"] == 1
+    code, out = _cli("consume", "--run-file", run, "--name", "t3", "--distance", "adjacent")
+    assert code == 2 and out["error"] == "BudgetExhausted"
+    code, out = _cli("status", "--run-file", run)
+    assert out["spent_this_run"] == 4 and out["trials_total"] == 2
+    code, out = _cli("commit", "--run-file", run)
+    assert out["committed"] is True and out["cumulative"] == 4
+    assert json.loads((tmp_path / "budget" / "s.json").read_text())["spent"] == {"_": 4}
+
+    # a second run on the same subject finds the budget nearly spent
+    run2 = str(tmp_path / "runs" / "r2" / "budget.json")
+    code, out = _cli("init", "--run-file", run2, "--store", store, "--subject", "s",
+                     "--reason", "retry", "--total", "5", "--track", "email")
+    assert out["remaining"] == 1 and out["spent_before"] == 4 and out["prior_trials"] == 2
+
+
+def test_cli_rerun_commits_nothing(tmp_path: Path) -> None:
+    run = str(tmp_path / "budget.json")
+    _cli("init", "--run-file", run, "--store", str(tmp_path / "store"), "--subject", "s",
+         "--reason", "rerun", "--total", "5")
+    _cli("consume", "--run-file", run, "--name", "t1", "--distance", "in_scope")
+    code, out = _cli("commit", "--run-file", run)
+    assert out["committed"] is False
+    assert not (tmp_path / "store").exists()

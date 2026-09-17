@@ -32,13 +32,38 @@ costs apply in both cases.
 What is left out on purpose: any statistic that corrects results for the
 number of trials. ``trials_total()`` exposes the number so you can plug in
 your own.
+
+How to use it
+-------------
+Load the budget for the subject at the start of a run, check before each
+trial, consume when the trial is actually measured, commit at the end::
+
+    budget = Budget.load(store=Path("budget"), subject="dataset_a", reason="first_pass",
+                         total=12, tracks=("email", "signup_date", "age"))
+    ok, why = budget.check("off_topic")           # refused while a track has no trial
+    trial = budget.consume("rule_03", "in_scope", track="email", accepted=True)
+    budget.remaining(), budget.summary()          # for the report
+    budget.commit(store=Path("budget"))           # adds this run's cost to the subject
+
+Store format: ``<store>/<subject>.json`` with the cumulative cost per
+compartment and the number of trials drawn. From a shell, the run's own
+state is kept in a second JSON file so that each command is one step::
+
+    python -m agent_harness.budget init    --run-file runs/r1/budget.json --store budget \
+        --subject dataset_a --reason first_pass --total 12 --track email --track age
+    python -m agent_harness.budget check   --run-file runs/r1/budget.json --distance off_topic
+    python -m agent_harness.budget consume --run-file runs/r1/budget.json --name rule_01 \
+        --distance in_scope --track email --accepted true
+    python -m agent_harness.budget commit  --run-file runs/r1/budget.json
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+import sys
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 __all__ = [
@@ -255,3 +280,118 @@ class Budget:
             line += " · " + ", ".join(parts)
         return line
 
+
+# ── Run state on disk, for the shell ─────────────────────────────────────────
+#
+# In-process, a Budget lives for the whole run. From a shell each command is a
+# new process, so the run's own state (config, trials so far, the store it
+# commits to) is kept in a JSON file the orchestrator never edits by hand.
+
+def save_run(budget: Budget, run_file: Path, store: Path) -> Path:
+    payload = {
+        "store": str(store), "subject": budget.subject, "reason": budget.reason,
+        "total": budget.total, "costs": dict(budget.costs), "in_scope": budget.in_scope,
+        "off_topic": budget.off_topic, "min_in_scope": budget.min_in_scope,
+        "tracks": list(budget.tracks), "compartments": dict(budget.compartments),
+        "prior": dict(budget.prior), "prior_trials": budget.prior_trials,
+        "trials": [asdict(t) for t in budget.trials],
+    }
+    run_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = run_file.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(run_file)
+    return run_file
+
+
+def restore_run(run_file: Path) -> tuple[Budget, Path]:
+    raw = json.loads(run_file.read_text(encoding="utf-8"))
+    b = Budget(total=raw["total"], costs=raw["costs"], in_scope=raw["in_scope"],
+               off_topic=raw["off_topic"], min_in_scope=raw["min_in_scope"],
+               tracks=tuple(raw["tracks"]), compartments=raw["compartments"],
+               subject=raw["subject"], reason=raw["reason"], prior=raw["prior"],
+               prior_trials=raw["prior_trials"])
+    b.trials = [Trial(**t) for t in raw["trials"]]
+    return b, Path(raw["store"])
+
+
+def _bool(s: str) -> bool:
+    if s.lower() in ("true", "yes", "1"):
+        return True
+    if s.lower() in ("false", "no", "0"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected true/false, got {s!r}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="agent_harness.budget",
+        description="Drive a trial budget one step at a time. JSON out; exit 2 on refusal.")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--run-file", required=True, type=Path)
+
+    i = sub.add_parser("init", parents=[common])
+    i.add_argument("--store", required=True, type=Path)
+    i.add_argument("--subject", required=True)
+    i.add_argument("--reason", required=True, choices=list(REASONS))
+    i.add_argument("--total", required=True, type=int)
+    i.add_argument("--min-in-scope", type=int, default=0)
+    i.add_argument("--track", action="append", default=[])
+    i.add_argument("--compartment", action="append", default=[], metavar="NAME=CAP")
+
+    c = sub.add_parser("check", parents=[common])
+    c.add_argument("--distance", required=True)
+    c.add_argument("--compartment", default=None)
+
+    k = sub.add_parser("consume", parents=[common])
+    k.add_argument("--name", required=True)
+    k.add_argument("--distance", required=True)
+    k.add_argument("--compartment", default=None)
+    k.add_argument("--track", default=None)
+    k.add_argument("--accepted", type=_bool, default=None)
+    k.add_argument("--note", default="")
+
+    sub.add_parser("status", parents=[common])
+    sub.add_parser("commit", parents=[common])
+
+    args = parser.parse_args(argv)
+    try:
+        if args.cmd == "init":
+            comps = dict((s.split("=", 1)[0], int(s.split("=", 1)[1])) for s in args.compartment)
+            b = Budget.load(args.store, args.subject, args.reason, total=args.total,
+                            min_in_scope=args.min_in_scope, tracks=tuple(args.track),
+                            compartments=comps)
+            save_run(b, args.run_file, args.store)
+            print(json.dumps({"ok": True, "remaining": b.remaining(), "spent_before": b.spent_before(),
+                              "prior_trials": b.prior_trials}))
+            return 0
+        b, store = restore_run(args.run_file)
+        if args.cmd == "check":
+            ok, why = b.check(args.distance, args.compartment)
+            print(json.dumps({"ok": ok, "reason": why, "remaining": b.remaining(args.compartment)}))
+            return 0 if ok else 2
+        if args.cmd == "consume":
+            trial = b.consume(args.name, args.distance, args.compartment, args.track,
+                              args.accepted, args.note)
+            save_run(b, args.run_file, store)
+            print(json.dumps({"ok": True, "trial": asdict(trial), "remaining": b.remaining(),
+                              "summary": b.summary()}))
+            return 0
+        if args.cmd == "status":
+            print(json.dumps({"ok": True, "remaining": b.remaining(), "spent_this_run": b.spent_this_run(),
+                              "cumulative": b.cumulative(), "trials_total": b.trials_total(),
+                              "summary": b.summary()}))
+            return 0
+        committed = b.commit(store)
+        print(json.dumps({"ok": True, "committed": committed, "cumulative": b.cumulative(),
+                          "reason": b.reason}))
+        return 0
+    except (BudgetExhausted, DriftRefused, ValueError) as exc:
+        print(json.dumps({"ok": False, "error": type(exc).__name__, "detail": str(exc)}))
+        return 2
+
+
+if __name__ == "__main__":  # pragma: no cover
+    from agent_harness.budget import main as _main
+
+    sys.exit(_main())

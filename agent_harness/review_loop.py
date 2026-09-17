@@ -28,6 +28,29 @@ This module enforces the rules:
 
 The loop is a boundary, not a phase: the orchestrator applies the outcome
 (open the next phase, reopen the previous one, or stop and report).
+
+How to use it
+-------------
+One ``Review`` per boundary, holding a ``BoundaryState`` that persists across
+retries; one ``decide`` per reviewer verdict::
+
+    review = Review(BoundaryState(boundary="rules→report"), max_retries=2,
+                    budget=budget, ledger=ledger, subject="dataset_a")
+    outcome = review.decide(
+        Decision.RETRY,
+        findings=[Finding(Direction.AGAINST, "rule_07 claims recall 0.8",
+                          "measure.json says 0.44")],
+        redo=["restate the claimed recall of rule_07"])
+    outcome.decision      # RETRY, or ESCALATE if the cap or the budget said so
+    outcome.retry_number  # 1
+
+From a shell, the boundary state lives in a JSON file the orchestrator never
+edits by hand::
+
+    python -m agent_harness.review_loop --state-file runs/r1/review/boundary.json \
+        --boundary "rules→report" --max-retries 2 --decision RETRY \
+        --finding "AGAINST::rule_07 claims recall 0.8::measure.json says 0.44" \
+        --redo "restate the claimed recall of rule_07" --ledger runs/ledger.md
 """
 
 from __future__ import annotations
