@@ -36,9 +36,15 @@ def test_the_run_matches_its_documentation(tmp_path: Path) -> None:
                              "t-theory_04": "undecided", "t-theory_07": "confirmed"}
 
     # refused before any spending, each for its own reason
-    assert s["refused"] == {"t-theory_03": "ValueError",          # budget: the age track has no theory yet
-                            "t-theory_05": "CitationRefused",     # a card the library does not have
-                            "t-theory_06": "AlreadyRefuted"}      # the same formulation as theory 1
+    assert s["refused"] == {"t-theory_03": "budget",       # the age track has no theory yet
+                            "t-theory_05": "library",      # a card the library does not have
+                            "t-theory_06": "knowledge"}    # the same formulation as theory 1
+    # every measured theory carries its four stamps, signed with the lab's secret
+    for i in s["measured"]:
+        steps = [json.loads(l)["step"] for l in
+                 (tmp_path / "t" / "theories" / i / "passport.json").read_text().splitlines()]
+        assert steps == ["cleared", "sealed", "consumed", "measured"]
+    assert (tmp_path / ".harness_secret").exists() and not (tmp_path / "t" / ".harness_secret").exists()
     # iteration 8: the write outside the jurisdiction was restored
     assert s["violations"] == ["state.json"]
     state = json.loads((tmp_path / "t" / "state.json").read_text())
@@ -79,7 +85,7 @@ def test_a_second_run_learns_from_the_first(tmp_path: Path) -> None:
     # the budget is shared across runs on the same table
     assert s["budget_prior"] == 5 and s["budget_spent"] == 4
     # theory 1 is refused as already refuted, before any spending
-    assert s["refused"]["second-theory_01"] == "AlreadyRefuted"
+    assert s["refused"]["second-theory_01"] == "knowledge"
     # the confirmed and undecided theories may be measured again; they build on their history
     assert s["measured"] == ["second-theory_02", "second-theory_04", "second-theory_07"]
     entries = [json.loads(l) for l in (tmp_path / "knowledge" / f"{example.dataset_id()}.jsonl").read_text().splitlines()]

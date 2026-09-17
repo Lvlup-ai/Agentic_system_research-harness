@@ -26,6 +26,21 @@ mechanical:
    zone, ``undecided`` otherwise. The researcher does not pick it.
 5. **Rewording is detected.** A note whose content no longer matches its seal
    yields a finding *against* the deliverable for the review loop.
+6. **Seal and measurement are irreversible.** A measured theory cannot be
+   measured again (``AlreadyMeasured``), and a theory that carries a verdict
+   but no seal is tampered, not unsealed: it cannot be sealed anew. The
+   verdict file records the seal it was computed under, and ``verify``
+   checks the two agree.
+
+Binding to the other modules
+----------------------------
+``seal`` and ``record_measure`` accept a *passport* (see
+``agent_harness.research.trial``): a step token, keyed by a secret the
+agents do not hold, that proves the previous step of the protocol happened
+on this exact note. With a passport, ``seal`` requires the note to have been
+cleared (knowledge, library, budget) and ``record_measure`` requires the
+trial to have been paid. Without one, the sequence is the caller's
+discipline, and the CLI says so (``--unguarded``).
 
 Layout on disk (one directory per theory)::
 
@@ -51,6 +66,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 __all__ = [
+    "AlreadyMeasured",
     "AlreadySealed",
     "Exchange",
     "IncompleteMeasure",
@@ -84,6 +100,10 @@ class UnfalsifiableNote(TheoryError):
 
 class AlreadySealed(TheoryError):
     pass
+
+
+class AlreadyMeasured(TheoryError):
+    """The theory has its verdict; measuring it again would let a verdict be chosen."""
 
 
 class NotSealed(TheoryError):
@@ -267,6 +287,14 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _write_atomic(path: Path, text: str) -> None:
+    """Never leave a half-written seal, measure or verdict behind."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
 class Theory:
     """One theory directory and the operations allowed on it, in order."""
 
@@ -378,18 +406,31 @@ class Theory:
             encoding="utf-8")
         return entry
 
-    def seal(self) -> str:
-        """Freeze the note. Returns its digest. Idempotent."""
+    def seal(self, passport=None) -> str:
+        """Freeze the note. Returns its digest. Idempotent on an intact seal.
+
+        A theory that carries a measurement or a verdict but no seal has had
+        its seal removed: it is tampered, and cannot be sealed anew. With a
+        ``passport``, the note must have been cleared (step ``cleared``) as it
+        is now, and the seal is stamped (step ``sealed``).
+        """
         note = self.note()
         if self.sealed:
             return self.seal_digest()  # type: ignore[return-value]
+        if self.measured or self.measure_path.exists():
+            raise TamperedNote(
+                f"{self.dir.name}: a measured theory has no seal: the seal was removed after the "
+                "measurement, which is tampering, not an unsealed note")
         digest = note.digest()
+        if passport is not None:
+            passport.require("cleared", digest)
         # The sealed note is copied into the seal: the hash detects a rewording,
         # the copy shows what was sealed and lets it be restored.
-        self.seal_path.write_text(json.dumps({
+        _write_atomic(self.seal_path, json.dumps({
             "digest": digest, "version": self.version, "sealed_at": _now(),
-            "note": note.model_dump(mode="json")}, indent=2, ensure_ascii=False),
-            encoding="utf-8")
+            "note": note.model_dump(mode="json")}, indent=2, ensure_ascii=False))
+        if passport is not None:
+            passport.stamp("sealed", digest)
         return digest
 
     def sealed_note(self) -> TheoryNote:
@@ -400,13 +441,15 @@ class Theory:
     def restore_sealed(self) -> TheoryNote:
         """Put the sealed note back in place of a reworded one."""
         note = self.sealed_note()
-        self.note_path.write_text(json.dumps(note.model_dump(mode="json"), indent=2,
-                                             ensure_ascii=False), encoding="utf-8")
+        _write_atomic(self.note_path, json.dumps(note.model_dump(mode="json"), indent=2,
+                                                 ensure_ascii=False))
         return note
 
     def verify(self) -> str:
-        """The note still matches its seal. Raises TamperedNote otherwise."""
+        """The note still matches its seal, and the verdict, if any, was computed under it."""
         if not self.sealed:
+            if self.measured or self.measure_path.exists():
+                raise TamperedNote(f"{self.dir.name}: measured, but the seal is gone")
             raise NotSealed("the note is not sealed; nothing to verify against")
         expected = self.seal_digest()
         actual = self.note().digest()
@@ -414,23 +457,42 @@ class Theory:
             raise TamperedNote(
                 f"the note changed after its seal (sealed {expected[:12]}…, now {actual[:12]}…): "
                 "a theory reworded after the fact is contested outright")
+        if self.measured:
+            under = json.loads(self.verdict_path.read_text(encoding="utf-8")).get("digest")
+            if under != expected:
+                raise TamperedNote(
+                    f"the verdict was computed under seal {str(under)[:12]}…, the note is sealed "
+                    f"as {expected[:12]}…: the seal was replaced after the measurement")
         return actual  # type: ignore[return-value]
 
-    def record_measure(self, values: Mapping[str, float]) -> tuple[Verdict, tuple[ZoneDecision, ...]]:
-        """Store the measurement and compute the verdict from the sealed zones."""
+    def record_measure(self, values: Mapping[str, float],
+                       passport=None) -> tuple[Verdict, tuple[ZoneDecision, ...]]:
+        """Store the measurement and compute the verdict from the sealed zones. Once.
+
+        With a ``passport``, the trial must have been paid (step ``consumed``)
+        on this sealed note, and the verdict is stamped (step ``measured``).
+        """
+        if self.measured or self.measure_path.exists():
+            raise AlreadyMeasured(
+                f"{self.dir.name} already has its verdict; a theory is measured once, "
+                "or the verdict would be the one that suits")
         if not self.sealed:
             raise NotSealed("measuring an unsealed theory is refused: seal it first")
         self.verify()
         note = self.note()
+        digest = self.seal_digest()
+        if passport is not None:
+            passport.require("consumed", digest)
         verdict, decisions = compute_verdict(note.zones, values)
-        self.measure_path.write_text(json.dumps(dict(values), indent=2, sort_keys=True),
-                                     encoding="utf-8")
-        self.verdict_path.write_text(json.dumps({
+        _write_atomic(self.measure_path, json.dumps(dict(values), indent=2, sort_keys=True))
+        _write_atomic(self.verdict_path, json.dumps({
             "verdict": verdict.value,
             "decisions": [d.model_dump() for d in decisions],
-            "digest": self.seal_digest(),
+            "digest": digest,
             "decided_at": _now(),
-        }, indent=2), encoding="utf-8")
+        }, indent=2))
+        if passport is not None:
+            passport.stamp("measured", digest, verdict=verdict.value)
         return verdict, decisions
 
     def verdict(self) -> Verdict | None:
@@ -448,11 +510,14 @@ class Theory:
         except NotSealed:
             return Finding(Direction.AGAINST, f"{self.dir.name}: measured without a seal",
                            "no seal.json next to the note")
-        except TamperedNote:
+        except TamperedNote as exc:
+            if not self.sealed:
+                return Finding(Direction.AGAINST, f"{self.dir.name}: seal removed after the measurement",
+                               f"{exc}; the seal is gone")
             sealed, now = self.sealed_note().model_dump(), self.note().model_dump()
             changed = sorted(k for k in now if now[k] != sealed.get(k))
             return Finding(Direction.AGAINST, f"{self.dir.name}: note reworded after its seal",
-                           f"field(s) changed since the seal: {changed}")
+                           f"field(s) changed since the seal: {changed}" if changed else str(exc))
         return None
 
     def summary(self) -> dict:
@@ -482,13 +547,31 @@ def main(argv: list[str] | None = None) -> int:
     a = sub.add_parser("amend", parents=[common]); a.add_argument("--note", required=True, type=Path)
     x = sub.add_parser("exchange", parents=[common])
     x.add_argument("--role", required=True); x.add_argument("--position", required=True)
-    sub.add_parser("seal", parents=[common])
+    guarded = argparse.ArgumentParser(add_help=False)
+    guarded.add_argument("--secret-file", type=Path, default=None,
+                         help="the run secret; the passport is <dir>/passport.json unless --passport")
+    guarded.add_argument("--passport", type=Path, default=None)
+    guarded.add_argument("--unguarded", action="store_true",
+                         help="skip the step token: the sequence is then your discipline")
+    sub.add_parser("seal", parents=[common, guarded])
     sub.add_parser("verify", parents=[common])
-    m = sub.add_parser("measure", parents=[common]); m.add_argument("--values", required=True, type=Path)
+    m = sub.add_parser("measure", parents=[common, guarded])
+    m.add_argument("--values", required=True, type=Path)
     sub.add_parser("status", parents=[common])
 
     args = parser.parse_args(argv)
     theory = Theory(args.dir)
+    passport = None
+    if args.cmd in ("seal", "measure"):
+        if args.unguarded == (args.secret_file is not None):
+            print(json.dumps({"ok": False, "error": "ProtocolError",
+                              "detail": f"{args.cmd} needs --secret-file (the step token) or, "
+                                        "explicitly, --unguarded"}))
+            return 2
+        if not args.unguarded:
+            from agent_harness.research.trial import Passport, load_secret
+            passport = Passport(args.passport or args.dir / "passport.json", args.dir.name,
+                                load_secret(args.secret_file))
     try:
         if args.cmd == "draft":
             note = theory.draft(json.loads(args.note.read_text(encoding="utf-8")))
@@ -500,16 +583,18 @@ def main(argv: list[str] | None = None) -> int:
             e = theory.record_exchange(args.role, args.position)
             out = {"ok": True, "entries": len(theory.exchange()), "note_version": e.note_version}
         elif args.cmd == "seal":
-            out = {"ok": True, "digest": theory.seal(), "version": theory.version}
+            out = {"ok": True, "digest": theory.seal(passport), "version": theory.version,
+                   "guarded": passport is not None}
         elif args.cmd == "verify":
             out = {"ok": True, "digest": theory.verify()}
         elif args.cmd == "measure":
-            verdict, decisions = theory.record_measure(json.loads(args.values.read_text(encoding="utf-8")))
+            verdict, decisions = theory.record_measure(
+                json.loads(args.values.read_text(encoding="utf-8")), passport)
             out = {"ok": True, "verdict": verdict.value,
-                   "decisions": [dd.model_dump() for dd in decisions]}
+                   "decisions": [dd.model_dump() for dd in decisions], "guarded": passport is not None}
         else:
             out = {"ok": True, **theory.summary()}
-    except TheoryError as exc:
+    except (TheoryError, ValueError, OSError) as exc:
         print(json.dumps({"ok": False, "error": type(exc).__name__, "detail": str(exc)},
                          ensure_ascii=False))
         return 2

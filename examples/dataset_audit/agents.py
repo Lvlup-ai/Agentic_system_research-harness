@@ -73,7 +73,8 @@ _SCRIPT: tuple[dict, ...] = (
          "zones": [{"metric": "precision", "confirm": {"max": 0.2}, "refute": {"min": 0.6}}],
          "refutation": "Out-of-range scores are labelled anomalies: they are form errors after all.",
          "measures": "Rule score range [0, 100]; precision.",
-         "cites": ["unit_mismatch"]},
+         "cites": ["unit_mismatch"],
+         "caveats": "unit_mismatch is an approximation: no producer id in the table."},
      "measurement": {"rule": {"column": "score", "op": "range", "value": [0, 100]},
                      "metrics": {"precision": {"fn": "precision"}}}},
     # 4 — undecided: impossible ages split evenly around 2023

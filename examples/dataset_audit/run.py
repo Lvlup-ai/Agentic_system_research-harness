@@ -9,16 +9,18 @@ Here it is a script, so the whole run is reproducible and the test suite can
 assert every line of the trace. The loop, per iteration:
 
     next_action ─► researcher writes note + measurement (under guard)
-      ─► knowledge.check_note   (not already refuted, builds on its track)
-      ─► library.require_citations
-      ─► budget.check           (distance, tracks)
+      ─► trial.clear            (knowledge, library, budget say yes; stamp `cleared`)
       ─► auditor challenges     (exchange recorded, GO / NO_GO)
-      ─► theory.seal
-      ─► budget.consume
+      ─► theory.seal            (requires `cleared` on this note; stamp `sealed`)
+      ─► trial.consume          (requires `sealed`; pays the cleared distance; stamp `consumed`)
       ─► measurement            (deterministic)
-      ─► theory.record_measure  (verdict computed from the sealed zones)
-      ─► researcher's postmortem, knowledge.record
+      ─► theory.record_measure  (requires `consumed`; verdict from the sealed zones; stamp `measured`)
+      ─► researcher's postmortem, knowledge.record (requires `measured`)
       ─► state_machine.record_result
+
+The stamps are HMACs keyed by a secret kept next to the runs, outside every
+run root, which the agents never read: the order of the protocol is a fact
+the harness checks, not a discipline of this script.
 
 Then the boundary: the report under contract, the reviewer, the retry cap,
 the ledger; and the idea rewritten on the verdicts.
@@ -37,9 +39,10 @@ from agent_harness.budget import Budget
 from agent_harness.jurisdiction import Guard, Matrix
 from agent_harness.ledger import Ledger
 from agent_harness.research.idea import Idea
-from agent_harness.research.knowledge import Knowledge, KnowledgeError
-from agent_harness.research.library import CitationRefused, Library
+from agent_harness.research.knowledge import Knowledge
+from agent_harness.research.library import Library
 from agent_harness.research.theory import Theory, TheoryError, Verdict, parse_note
+from agent_harness.research.trial import Passport, Refused, clear, consume, new_secret
 from agent_harness.review_loop import BoundaryState, Decision, Review
 from agent_harness.state_machine import (
     Audit,
@@ -90,6 +93,7 @@ def run(runs_root: Path, run_id: str = "example", quiet: bool = False) -> dict:
 
     # -- pre-declared everything ---------------------------------------------
     idea = Idea.load(IDEA)
+    secret = new_secret(runs_root / ".harness_secret")     # outside every run root
     library = Library(LIBRARY)
     if not library.index_is_current():
         library.write_index()
@@ -127,6 +131,7 @@ def run(runs_root: Path, run_id: str = "example", quiet: bool = False) -> dict:
         n = machine.state.iteration
         item = f"{run_id}-theory_{n:02d}"
         theory = Theory(ctx.root / "theories" / item)
+        passport = Passport(theory.dir / "passport.json", item, secret)
 
         # researcher, under guard, with what is already known
         with Guard(ctx.root, MATRIX, "researcher", {"item": item}) as g:
@@ -141,22 +146,18 @@ def run(runs_root: Path, run_id: str = "example", quiet: bool = False) -> dict:
         # the note itself: well-formed and falsifiable
         try:
             note = parse_note(json.loads(theory.note_path.read_text()))
-        except (TheoryError, ValueError) as exc:
+        except (TheoryError, ValueError, OSError) as exc:
             _say(trace, f"[{n}] {item}: note refused — {exc}", quiet)
             fail(FailureKind.INVALID_OUTPUT)
             continue
 
-        # what is already known, the library, the budget: all before any spending
+        # clearance: knowledge, library and budget, all before any spending; stamped
         try:
-            knowledge.check_note(note)
-            library.require_citations(note.cites)
-            ok, why = budget.check(meta["distance"])
-            if not ok:
-                raise ValueError(why)
-        except (KnowledgeError, CitationRefused, ValueError) as exc:
-            refused[item] = type(exc).__name__
+            clear(theory, knowledge, library, budget, meta["distance"], passport)
+        except Refused as exc:
+            refused[item] = exc.cause
             _say(trace, f"[{n}] {item} ({note.track}, {meta['distance']}): refused before any spending — "
-                        f"{type(exc).__name__}: {exc}", quiet)
+                        f"{exc}", quiet)
             fail(FailureKind.REFUSED)
             continue
 
@@ -173,11 +174,11 @@ def run(runs_root: Path, run_id: str = "example", quiet: bool = False) -> dict:
             _say(trace, f"[{n}] {item}: audit NO_GO — {position}", quiet)
             continue
 
-        # seal, spend, measure, judge
-        digest = theory.seal()
-        trial = budget.consume(item, meta["distance"], track=note.track)
+        # seal, pay, measure, judge — each step requiring the previous stamp
+        digest = theory.seal(passport)
+        trial = consume(theory, budget, passport)
         values = run_measurement(json.loads((theory.dir / "measurement.json").read_text()), table, COLUMNS)
-        v, decisions = theory.record_measure(values)
+        v, decisions = theory.record_measure(values, passport)
         measured.append(item)
 
         # the researcher's postmortem; then the verdict becomes knowledge — unless
@@ -185,7 +186,7 @@ def run(runs_root: Path, run_id: str = "example", quiet: bool = False) -> dict:
         # boundary catches it and it is recorded once restored
         refuted_exactly, lessons = agents.postmortem(theory)
         if theory.integrity_finding() is None:
-            knowledge.record(theory, run_id, refuted_exactly, lessons)
+            knowledge.record(theory, run_id, refuted_exactly, lessons, passport=passport)
         accepted = v is not Verdict.UNDECIDED
         score = sum(1 for d in decisions if d.decision is not Verdict.UNDECIDED) / len(decisions)
         machine.record_result(accepted, score, item)
@@ -232,7 +233,8 @@ def run(runs_root: Path, run_id: str = "example", quiet: bool = False) -> dict:
                 agents.restore(theory)
             if item not in knowledge.ids():
                 refuted_exactly, lessons = agents.postmortem(theory, misbehave=False)
-                knowledge.record(theory, run_id, refuted_exactly, lessons)
+                knowledge.record(theory, run_id, refuted_exactly, lessons,
+                                 passport=Passport(theory.dir / "passport.json", item, secret))
 
     (ctx.root / "review").mkdir(exist_ok=True)
     (ctx.root / "review" / "boundary.json").write_text(review.state.model_dump_json(indent=2))

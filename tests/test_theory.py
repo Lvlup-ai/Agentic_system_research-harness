@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from agent_harness.research.theory import (
+    AlreadyMeasured,
     AlreadySealed,
     IncompleteMeasure,
     Interval,
@@ -210,6 +211,50 @@ def test_the_grey_zone_is_undecided(tmp_path: Path) -> None:
     assert t.record_measure({"share_after_2023": 0.6})[0] is Verdict.UNDECIDED
 
 
+# ── Irreversibility ──────────────────────────────────────────────────────────
+
+def test_a_theory_is_measured_once(tmp_path: Path) -> None:
+    t = theory(tmp_path)
+    t.seal()
+    assert t.record_measure({"share_after_2023": 0.33})[0] is Verdict.REFUTED
+    with pytest.raises(AlreadyMeasured, match="measured once"):
+        t.record_measure({"share_after_2023": 0.95})
+    assert t.verdict() is Verdict.REFUTED, "the verdict that suits was not written"
+
+
+def test_removing_the_seal_after_measuring_does_not_allow_a_new_one(tmp_path: Path) -> None:
+    t = theory(tmp_path)
+    t.seal()
+    t.record_measure({"share_after_2023": 0.33})
+    t.seal_path.unlink()
+    raw = json.loads(t.note_path.read_text())
+    raw["prediction"] = "About a third, as observed."
+    t.note_path.write_text(json.dumps(raw))
+    with pytest.raises(TamperedNote, match="seal was removed after the measurement"):
+        t.seal()
+    assert not t.sealed
+    f = t.integrity_finding()
+    assert f is not None and "seal is gone" in f.evidence
+
+
+def test_a_verdict_computed_under_another_seal_is_detected(tmp_path: Path) -> None:
+    t = theory(tmp_path)
+    t.seal()
+    t.record_measure({"share_after_2023": 0.33})
+    raw = json.loads(t.verdict_path.read_text())
+    raw["digest"] = "0" * 64
+    t.verdict_path.write_text(json.dumps(raw))
+    with pytest.raises(TamperedNote, match="seal was replaced after the measurement"):
+        t.verify()
+
+
+def test_seal_measure_and_verdict_are_written_atomically(tmp_path: Path) -> None:
+    t = theory(tmp_path)
+    t.seal()
+    t.record_measure({"share_after_2023": 0.33})
+    assert not list(t.dir.glob("*.tmp"))
+
+
 # ── Tampering ────────────────────────────────────────────────────────────────
 
 def test_a_note_reworded_after_the_seal_is_detected(tmp_path: Path) -> None:
@@ -248,7 +293,7 @@ def test_the_seal_keeps_a_copy_and_can_restore_it(tmp_path: Path) -> None:
     assert t.verify() == t.seal_digest() and t.integrity_finding() is None
 
 
-def test_an_unsealed_measured_theory_is_a_finding_too(tmp_path: Path) -> None:
+def test_an_unsealed_theory_is_a_finding_too(tmp_path: Path) -> None:
     t = theory(tmp_path)
     f = t.integrity_finding()
     assert f is not None and "without a seal" in f.claim
@@ -271,13 +316,13 @@ def test_cli_drives_a_theory_to_its_verdict(tmp_path: Path) -> None:
 
     code, out = _cli("draft", "--dir", d, "--note", str(note))
     assert code == 0 and out["metrics"] == ["share_after_2023"]
-    code, out = _cli("measure", "--dir", d, "--values", str(values))
+    code, out = _cli("measure", "--dir", d, "--values", str(values), "--unguarded")
     assert code == 2 and out["error"] == "NotSealed"
-    code, out = _cli("seal", "--dir", d)
-    assert code == 0 and len(out["digest"]) == 64
+    code, out = _cli("seal", "--dir", d, "--unguarded")
+    assert code == 0 and len(out["digest"]) == 64 and out["guarded"] is False
     code, out = _cli("amend", "--dir", d, "--note", str(note))
     assert code == 2 and out["error"] == "AlreadySealed"
-    code, out = _cli("measure", "--dir", d, "--values", str(values))
+    code, out = _cli("measure", "--dir", d, "--values", str(values), "--unguarded")
     assert code == 0 and out["verdict"] == "confirmed"
     code, out = _cli("status", "--dir", d)
     assert out["sealed"] and out["verdict"] == "confirmed" and out["version"] == 1

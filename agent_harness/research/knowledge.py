@@ -206,14 +206,25 @@ class Knowledge:
     # -- recording -----------------------------------------------------------
 
     def record(self, theory: Theory, run_id: str, refuted_exactly: str = "",
-               lessons: Sequence[str] = ()) -> Entry:
-        """Append a measured, intact theory. Nothing is ever rewritten."""
+               lessons: Sequence[str] = (), passport=None) -> Entry:
+        """Append a measured, intact theory. Nothing is ever rewritten.
+
+        With a ``passport`` (see ``research.trial``), the theory must carry the
+        ``measured`` stamp on its sealed digest, with the same verdict.
+        """
         if not theory.measured:
             raise NotRecordable(f"{theory.dir.name}: no verdict yet; a theory is recorded once measured")
         theory.verify()  # a reworded note is not knowledge
         note = theory.note()
         verdict = theory.verdict()
         assert verdict is not None
+        if passport is not None:
+            stamp = passport.require("measured", theory.seal_digest())
+            if stamp["data"].get("verdict") != verdict.value:
+                raise NotRecordable(f"{theory.dir.name}: the stamped verdict is "
+                                    f"{stamp['data'].get('verdict')!r}, the file says {verdict.value!r}")
+        if any(e.theory_id == theory.dir.name for e in self.entries):
+            raise NotRecordable(f"{theory.dir.name} is already recorded on this subject")
         if verdict is Verdict.REFUTED and not refuted_exactly.strip():
             raise NotRecordable(
                 f"{theory.dir.name}: a refutation must say what exactly was refuted; "
@@ -254,6 +265,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--run-id", required=True)
     r.add_argument("--refuted-exactly", default="")
     r.add_argument("--lesson", action="append", default=[])
+    r.add_argument("--secret-file", type=Path, default=None, help="require the theory's measured stamp")
+    r.add_argument("--passport", type=Path, default=None, help="default: <theory-dir>/passport.json")
 
     args = parser.parse_args(argv)
     k = Knowledge(args.store, args.subject)
@@ -268,9 +281,15 @@ def main(argv: list[str] | None = None) -> int:
             k.check_note(json.loads(args.note.read_text(encoding="utf-8")))
             out = {"ok": True}
         else:
-            e = k.record(Theory(args.theory_dir), args.run_id, args.refuted_exactly, args.lesson)
+            passport = None
+            if args.secret_file is not None:
+                from agent_harness.research.trial import Passport, load_secret
+                passport = Passport(args.passport or args.theory_dir / "passport.json",
+                                    args.theory_dir.name, load_secret(args.secret_file))
+            e = k.record(Theory(args.theory_dir), args.run_id, args.refuted_exactly, args.lesson,
+                         passport=passport)
             out = {"ok": True, "theory_id": e.theory_id, "verdict": e.verdict.value, "entries": len(k.entries)}
-    except (KnowledgeError, ValueError) as exc:
+    except (KnowledgeError, ValueError, OSError) as exc:
         print(json.dumps({"ok": False, "error": type(exc).__name__, "detail": str(exc)}, ensure_ascii=False))
         return 2
     print(json.dumps(out, ensure_ascii=False))
