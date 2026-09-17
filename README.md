@@ -55,8 +55,9 @@ writes a state file, never picks a verdict, never decides a retry.
 |---|---|
 | [`research/idea`](agent_harness/research/idea.py) | The human starting point: mechanism, why, orders of magnitude, tracks. Frozen during a run; rewritten at the end from the knowledge store, every claim carrying its theory and verdict. |
 | [`research/library`](agent_harness/research/library.py) | Closed knowledge: cards with a status (`usable`, `needs_extension`, `out_of_data`), an index generated from them, citations checked before any trial. |
-| [`research/theory`](agent_harness/research/theory.py) | The theory note, declared before the measurement. Falsifiable or refused. Sealed by hash; a reworded note is detected and restored. The verdict is computed from the declared zones, never chosen. |
+| [`research/theory`](agent_harness/research/theory.py) | The theory note, declared before the measurement. Falsifiable or refused. Sealed by hash; a reworded note is detected and restored. The verdict is computed from the declared zones, never chosen, and never recomputed: a theory is measured once. |
 | [`research/knowledge`](agent_harness/research/knowledge.py) | What past theories established: append-only, per subject. The same formulation is not refuted twice; a note on a track with history must say what it builds on; lessons feed the briefs. |
+| [`research/trial`](agent_harness/research/trial.py) | The step token that binds the modules: an append-only chain of HMAC stamps, keyed by a run secret the agents never hold. No seal without clearance by knowledge, library and budget; no payment without a seal; no measurement without payment; the distance paid is the one cleared. |
 
 ## The substrate
 
@@ -70,9 +71,19 @@ writes a state file, never picks a verdict, never decides a retry.
 | [`review_loop`](agent_harness/review_loop.py) | The bounded adversarial loop: PASS / RETRY / ESCALATE. A RETRY needs a finding *against* the result; beyond the cap it becomes an ESCALATE. |
 | [`prompt_tests`](agent_harness/prompt_tests.py) | Tests that check an agent brief tells the truth about the repository: counts, quoted thresholds, named tools, stale phrases. |
 
-Every module has a CLI that prints JSON, so an orchestrating LLM can drive
-it from a shell. Every module header says why it exists, how to use it, the
-format of what it reads and writes, and the shell commands.
+Every module has a CLI, so an orchestrating LLM can drive it from a shell:
+a refusal is a JSON line and exit code 2 (`prompt_tests` and `library
+verify-index` use exit 1 for "the check failed", as test runners do). Every
+module header says why it exists, how to use it, and the format of what it
+reads and writes.
+
+What is enforced, and by what: each module refuses what it can see (an
+unsealed note, an unknown card, an exhausted budget, an event out of order).
+The *order* between modules is enforced by the passport of `research/trial`:
+with it, `seal` and `measure` refuse a note that was not cleared and a trial
+that was not paid. Without it (`--unguarded`, or the Python API called
+without a passport), the sequence is the caller's discipline, and the
+harness says so.
 
 ## Quickstart
 
@@ -97,46 +108,56 @@ what the first established. Its briefs are tested against its code:
 .venv/bin/python -m agent_harness.prompt_tests examples/dataset_audit/prompt_checks.yaml --base .
 ```
 
-Plugging a model in means replacing four function bodies. Nothing else
-changes.
+Plugging a model in means replacing five function bodies in `agents.py`.
+Nothing else changes.
 
 ## Driving it from a shell
 
 Each module is also a command. One theory, as an orchestrating LLM would run
-it:
+it. The secret file lives outside every run root and outside every path an
+agent can read; `runs/r1/budget.json` is the run's budget state:
 
 ```bash
 python -m agent_harness.research.idea freeze --idea idea.md --run-root runs/r1
+python -m agent_harness.budget init --run-file runs/r1/budget.json --store budget --subject s --reason first_pass --total 12 --track email
 python -m agent_harness.research.knowledge briefing --store knowledge --subject s --track email
 #   ... the researcher writes runs/r1/theories/t01/note.json under a jurisdiction guard ...
-python -m agent_harness.research.knowledge check --store knowledge --subject s --note runs/r1/theories/t01/note.json
-python -m agent_harness.research.library check --dir library --cite form_validation_regression
-python -m agent_harness.budget check --run-file runs/r1/budget.json --distance in_scope
+python -m agent_harness.research.trial clear --dir runs/r1/theories/t01 --secret-file .secret --budget-run-file runs/r1/budget.json --distance in_scope --store knowledge --subject s --library library
 python -m agent_harness.research.theory exchange --dir runs/r1/theories/t01 --role auditor --position "falsifiable"
-python -m agent_harness.research.theory seal --dir runs/r1/theories/t01
-python -m agent_harness.budget consume --run-file runs/r1/budget.json --name t01 --distance in_scope --track email
-#   ... the measurement runs ...
-python -m agent_harness.research.theory measure --dir runs/r1/theories/t01 --values values.json
-python -m agent_harness.research.knowledge record --store knowledge --subject s --theory-dir runs/r1/theories/t01 --run-id r1
+python -m agent_harness.research.theory seal --dir runs/r1/theories/t01 --secret-file .secret
+python -m agent_harness.research.trial consume --dir runs/r1/theories/t01 --secret-file .secret --budget-run-file runs/r1/budget.json
+#   ... the measurement runs and writes values.json: the numbers the note predicted ...
+python -m agent_harness.research.theory measure --dir runs/r1/theories/t01 --secret-file .secret --values values.json
+python -m agent_harness.research.knowledge record --store knowledge --subject s --theory-dir runs/r1/theories/t01 --run-id r1 --secret-file .secret
+python -m agent_harness.budget commit --run-file runs/r1/budget.json
 ```
 
-A forbidden transition, an unknown role, an unfalsifiable note, a citation
-outside the library, a measurement on an unsealed note or an invented
-verdict all exit with code 2 and a JSON error, and save nothing.
+Skip `trial clear` and `seal` is refused; skip `trial consume` and `measure`
+is refused; measure twice and the second is refused; edit a stamp and every
+later command is refused. A forbidden transition, an unknown role, an
+unfalsifiable note, a citation outside the library or an invented verdict
+exit with code 2 and a JSON error, and save nothing. This sequence is
+replayed by the test suite.
 
 ## Design rules
 
 - Same inputs and same code give the same outputs. No randomness anywhere.
 - Every threshold is declared before the run, in a file, and is never changed
   during the run.
-- A theory is written before its measurement and judged by what it declared.
+- A theory is written before its measurement, judged by what it declared,
+  and measured once.
 - A refused event leaves no trace. A recorded one is never rewritten.
+- The order of the protocol is a fact the harness checks (the passport),
+  not a discipline of the orchestrator.
 - A prompt is a document that nothing compiles. Here, prompts are tested.
 
 ## Status and roadmap
 
-Early. The eleven modules above are complete and tested; the API may still
-move. Next steps, in rough order:
+Early. The twelve modules above are complete and tested; the API may still
+move. Known limits, stated rather than hidden: the guard only watches the
+roots it is given, so an agent with shell access can write elsewhere; the
+measured values come from whoever runs the measurement; a run's `config.json`
+is not sealed. Next steps, in rough order:
 
 - a **security gate**: self-tests that prove each guard works before a run
   starts, so a silent regression cannot let a run go unguarded;

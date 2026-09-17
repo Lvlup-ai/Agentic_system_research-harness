@@ -37,7 +37,7 @@ Eight iterations, each exercising one mechanism of the research loop:
 |---|---|---|
 | 1 | `email`, in scope: malformed emails cluster after a 2023 deployment | sealed, measured; `share_after_2023` = 0.0 falls in the refutation zone ⇒ **refuted**. The postmortem says what exactly: the 2023 cut-off, not the idea |
 | 2 | `signup_date`, in scope: future dates exist and are all anomalies | `flagged` = 2, `precision` = 1.0 ⇒ **confirmed** |
-| 3 | `score`, off topic: out-of-range scores are a unit problem | **refused before any spending**: the `age` track has no theory yet |
+| 3 | `score`, off topic: out-of-range scores are a unit problem | **refused before any spending** by the budget: the `age` track has no theory yet |
 | 4 | `age`, in scope: impossible ages cluster after 2023 | `share_after_2023` = 0.5 is in the grey zone ⇒ **undecided** |
 | 5 | `age`, adjacent, citing `server_side_dedup` | **refused**: the library has no such card |
 | 6 | `email`, in scope: the same formulation as theory 1 | **refused**: already refuted; the note names what was refuted |
@@ -56,9 +56,11 @@ run must pay for again are listed.
 Everything lands under `examples/dataset_audit/runs/<run id>/`: `state.json`
 (written only by the state machine), `idea.frozen.json`, one directory per
 theory with `note.json`, `measurement.json`, `audit.md`, `exchange.json`,
+`passport.json` (the four stamps: cleared, sealed, consumed, measured),
 `seal.json`, `measure.json` and `verdict.json`, then `report.json`,
 `review/` and `idea_rewritten.md`. Next to the runs, and persisting across
-them: `knowledge/<subject>.jsonl`, `budget/<subject>.json`, `ledger.md`.
+them: `knowledge/<subject>.jsonl`, `budget/<subject>.json`, `ledger.md`, and
+`.harness_secret`, the key of the stamps, which no agent reads.
 
 ## Run it twice
 
@@ -82,9 +84,9 @@ python -m agent_harness.prompt_tests examples/dataset_audit/prompt_checks.yaml -
 
 ## Plugging a model in
 
-Replace the bodies of `research`, `audit`, `postmortem` and `review` in
-`agents.py` with calls to your model, each reading the matching brief, the
-knowledge briefing and the library index. Keep the files and return shapes.
-Nothing else changes: the seal, the computed verdict, the budget, the
-guard, the contract and the review cap apply to a model exactly as they
-apply to the script.
+Replace the bodies of `research`, `audit`, `postmortem`, `restore` and
+`review` in `agents.py` with calls to your model, each reading the matching
+brief, the knowledge briefing and the library index. Keep the files and
+return shapes. Nothing else changes: the passport, the seal, the computed
+verdict, the budget, the guard, the contract and the review cap apply to a
+model exactly as they apply to the script.
