@@ -7,14 +7,15 @@ on many subjects, selects "the best of N" in a way no per-run statistic can
 see. The ledger is the counter that makes this visible: one line per event,
 never edited, never reordered, readable by a human without any tool.
 
-Two lessons from the original pipeline shaped the reading side:
+Two rules shape the reading side:
 
 * the vocabulary must be closed, otherwise agents invent event names and the
   counts stop meaning anything;
-* counting only the *known* events under-counts the ledger. A report once
-  announced 19 lines for a file that held 32, because older entries used
-  names that had since been dropped from the list. ``counts()`` and
-  ``total_lines()`` are therefore two different questions.
+* counting only the *known* events under-counts the ledger: older entries
+  may use names that have since been dropped from the list, and a report
+  that sums the known counts then announces fewer lines than the file
+  holds. ``counts()`` and ``total_lines()`` are therefore two different
+  questions.
 
 Format
 ------

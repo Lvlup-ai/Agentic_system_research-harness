@@ -3,11 +3,11 @@
 Why this module exists
 ----------------------
 One agent writes a file, another reads it. The loader is the interface
-between the two, and it must verify what it reads. In the original pipeline
-a specification said for a month that block B "reads the report of block A",
-and no component could actually read it: no loader, no schema, no boundary
-test. When one was written, it caught truncated files, reports whose summary
-contradicted their own rows, and a JSON round trip that had turned NaN into
+between the two, and it must verify what it reads. A specification that
+says block B "reads the report of block A" is not an interface: without a
+loader, a schema and a boundary test, nothing can actually read it, and the
+first real loader typically catches truncated files, reports whose summary
+contradicts their own rows, and a JSON round trip that has turned NaN into
 null and integer keys into strings.
 
 What the loader refuses, in order

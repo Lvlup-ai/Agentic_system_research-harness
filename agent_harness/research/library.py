@@ -3,15 +3,15 @@
 Why this module exists
 ----------------------
 A researcher agent given free rein will reach for any concept it knows, some
-of which the data cannot support and some of which are simply invented. The
-original pipeline gave its researcher a library of cards instead, each one
-carrying a status: usable as is, usable with an approximation the researcher
-must declare, or out of reach of the data. Two things went wrong anyway, and
-both are enforced here:
+of which the data cannot support and some of which are simply invented. A
+research lab gives its researcher a library of cards instead: each card is
+one concept, and carries a status that says what the data allows, usable as
+is, usable with an approximation the researcher must declare, or out of
+reach. Two failures are then still possible, and both are closed here:
 
-* a brief announced the library's counts from memory, and they were wrong for
-  a month: the index is **generated** from the cards, never written by hand,
-  and the counts are read from it;
+* a brief or an index that announces the library's contents from memory goes
+  wrong the day a card is added: the index is **generated** from the cards,
+  never written by hand, and the counts are read from it;
 * a card without a status is invisible to every count, hence to the agent: a
   card whose status is missing or unknown is **refused at load time**.
 

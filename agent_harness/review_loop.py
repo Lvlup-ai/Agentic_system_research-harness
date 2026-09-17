@@ -4,11 +4,11 @@ Why this module exists
 ----------------------
 At the boundary between two blocks, a reviewing agent checks the deliverable
 against its sources and decides whether the producing block must redo its
-work. The original pipeline wrote the rules in the reviewer's mandate: three
+work. Writing the rules in the reviewer's mandate is not enough: three
 decisions, a cap of N retries declared before the run, a retry only on a
-finding that goes against the result, and a line in the ledger each time.
-None of it was enforced. An audit later found the cap had no real cost and
-the ledger held one line for two retries.
+finding that goes against the result, a line in the ledger each time. A
+mandate is a prompt; a reviewer that forgets the cap, or an orchestrator
+that forgets the ledger line, breaks the rule without anyone seeing it.
 
 This module enforces the rules:
 

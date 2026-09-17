@@ -3,11 +3,11 @@
 Why this module exists
 ----------------------
 A researcher that starts every run from the idea alone re-pays what earlier
-runs already paid. The original pipeline kept a section called "what
-experience established, and no run must pay for again", and its researcher
-rewrote the starting idea after dozens of trials with a number behind every
-claim. That memory was a document; this module makes it a store the harness
-reads and enforces:
+runs already paid: the same formulation measured twice, a track reopened
+without its verdicts, a lesson learnt and lost. Keeping "what experience
+established, and no run must pay for again" in a document helps only if
+someone reads it. This module makes it a store the harness reads and
+enforces before every new trial:
 
 * every measured theory is **recorded** with its verdict, its sealed digest,
   and, when refuted, *what exactly* was refuted (often a formulation, not the

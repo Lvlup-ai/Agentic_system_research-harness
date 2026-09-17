@@ -4,8 +4,8 @@ Why this module exists
 ----------------------
 When no data is hidden from the agents, the only thing that bounds a search
 is what it costs. Each hypothesis actually measured consumes budget; when the
-budget is gone, the harness refuses. Four mechanisms, each born from an
-incident in the original pipeline:
+budget is gone, the harness refuses. Four mechanisms, each closing a way a
+research loop cheats itself without noticing:
 
 1. **Cost by distance.** A trial inside the question asked costs 1, a
    neighbouring one 2, an off-topic one 3. Drifting away from the brief is
@@ -14,13 +14,14 @@ incident in the original pipeline:
    must have received at least one in-scope trial. Without this, an agent
    could leave the question on its first trial without ever trying it.
 3. **Persistence per subject.** The cumulative cost is written to disk and
-   reloaded on the next run. The pipeline's counter used to restart at zero
-   on every execution, so "a retry costs trials" cost nothing at all, and an
-   audit escalated it.
+   reloaded on the next run. A counter that restarts at zero on every
+   execution makes "a retry costs trials" cost nothing at all, and the loop
+   quietly measures far more hypotheses than it reports.
 4. **The reason for the pass.** ``first_pass`` and ``retry`` consume;
-   ``rerun`` does not. Strict persistence was rejected on a measurement: four
-   technical re-runs in one night, one of them an import error, would have
-   consumed 72 trials out of 36. A tooling error must not cost research budget.
+   ``rerun`` does not. Strict persistence would charge every crash, import
+   error and regenerated report as new hypotheses, and a night of tooling
+   fixes could exhaust a budget on its own. A tooling error must not cost
+   research budget.
 
 Compartments
 ------------

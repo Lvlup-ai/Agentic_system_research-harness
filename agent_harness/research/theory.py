@@ -3,11 +3,12 @@
 Why this module exists
 ----------------------
 A researcher agent that sees the numbers before writing what it expected will
-write what it saw. The original pipeline learnt this the expensive way:
-"theories" that were parametric variants of one idea, a criterion of
-refutation that fired far too often on pure noise, and theories quietly
-reworded after the measurement to fit the result. The fix was procedural, and
-this module makes it mechanical:
+write what it saw. Left to itself, a research loop drifts into three failures:
+"theories" that are parametric variants of one idea with no mechanism behind
+them, criteria of refutation that fire on pure noise, and theories quietly
+reworded after the measurement to fit the result. All three are invisible in
+the final numbers. This module makes the discipline that prevents them
+mechanical:
 
 1. **The note comes first.** Mechanism, quantified prediction, what would
    prove it wrong, what is measured and why that tests *this* mechanism. No
