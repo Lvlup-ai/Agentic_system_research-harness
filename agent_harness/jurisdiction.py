@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -119,50 +120,77 @@ class GuardResult:
 
 # ── File walking ─────────────────────────────────────────────────────────────
 
+# Symbolic links are entries in their own right: the snapshot records the link
+# (its target string), never the file it points to. Paths are handled
+# lexically, without resolving links, so a restoration can only ever touch a
+# path under a watched root. Following a link here once made the guard delete
+# a file outside the run that an agent had merely linked to.
+_LINK_MARK = b"\0symlink\0"
+
+
+def _entry(p: Path) -> bytes:
+    """What the snapshot stores for a path: the link target, or the file bytes."""
+    if p.is_symlink():
+        return _LINK_MARK + os.readlink(p).encode("utf-8", "surrogateescape")
+    return p.read_bytes()
+
+
 def _files_under(base: Path) -> Iterator[Path]:
-    if base.is_file():
+    if base.is_symlink() or base.is_file():
         yield base
     elif base.is_dir():
-        for p in sorted(base.rglob("*")):
-            if p.is_file():
+        for p in sorted(base.rglob("*")):     # rglob does not descend into linked directories
+            if p.is_symlink() or p.is_file():
                 yield p
 
 
 def _watched_roots(run_root: Path, protected: tuple[Path, ...]) -> list[Path]:
-    return [run_root, *[p for p in protected if p.exists()]]
+    return [run_root, *[p for p in protected if p.exists() or p.is_symlink()]]
 
 
 def _under(path: Path, root: Path) -> bool:
-    r = root.resolve()
-    p = path.resolve()
+    """Lexical containment: no link is followed."""
+    r = root.absolute()
+    p = path.absolute()
     return p == r or r in p.parents
 
 
 def snapshot(run_root: Path, protected: tuple[Path, ...] = ()) -> dict[str, bytes]:
-    """In-memory snapshot: absolute resolved path → file bytes."""
+    """In-memory snapshot: absolute (lexical) path → entry bytes."""
     out: dict[str, bytes] = {}
     for base in _watched_roots(run_root, protected):
         for f in _files_under(base):
-            out[str(f.resolve())] = f.read_bytes()
+            out[str(f.absolute())] = _entry(f)
     return out
 
 
 def _is_violation(abs_path: Path, run_root: Path, globs: tuple[str, ...]) -> bool:
     """Under the run root → check the globs; anywhere else watched → always."""
     if _under(abs_path, run_root):
-        rel = abs_path.resolve().relative_to(run_root.resolve()).as_posix()
+        rel = abs_path.absolute().relative_to(run_root.absolute()).as_posix()
         return not is_writable(rel, globs)
     return True
 
 
 def _display(abs_path: Path, run_root: Path, protected: tuple[Path, ...]) -> str:
-    p = abs_path.resolve()
+    p = abs_path.absolute()
     if _under(abs_path, run_root):
-        return p.relative_to(run_root.resolve()).as_posix()
+        return p.relative_to(run_root.absolute()).as_posix()
     for base in protected:
         if _under(abs_path, base):
-            return p.relative_to(base.resolve().parent).as_posix()
+            return p.relative_to(base.absolute().parent).as_posix()
     return p.as_posix()
+
+
+def _put_back(abs_path: Path, original: bytes) -> None:
+    """Rewrite an entry as it was: a link as a link, a file as a file."""
+    if abs_path.is_symlink() or abs_path.exists():
+        abs_path.unlink()                      # unlink() removes a link, never its target
+    abs_path.parent.mkdir(parents=True, exist_ok=True)
+    if original.startswith(_LINK_MARK):
+        abs_path.symlink_to(original[len(_LINK_MARK):].decode("utf-8", "surrogateescape"))
+    else:
+        abs_path.write_bytes(original)
 
 
 def _restore(changed: set[str], before: Mapping[str, bytes | None],
@@ -175,19 +203,21 @@ def _restore(changed: set[str], before: Mapping[str, bytes | None],
     """
     violations: list[str] = []
     restored: list[str] = []
+    roots = _watched_roots(run_root, protected)
     for abs_str in sorted(changed):
         abs_path = Path(abs_str)
         if not _is_violation(abs_path, run_root, globs):
             continue
         shown = _display(abs_path, run_root, protected)
         violations.append(shown)
+        if not any(_under(abs_path, r) for r in roots):
+            continue                           # never touch anything outside the watched roots
         original = before.get(abs_str)
         if original is not None:
-            abs_path.parent.mkdir(parents=True, exist_ok=True)
-            abs_path.write_bytes(original)
+            _put_back(abs_path, original)
             restored.append(shown)
-        elif abs_path.exists():
-            abs_path.unlink()
+        elif abs_path.is_symlink() or abs_path.exists():
+            abs_path.unlink()                  # an illegal addition; a link goes, its target stays
             restored.append(shown)
     return GuardResult(ok=not violations, violations=tuple(violations), restored=tuple(restored))
 
@@ -244,11 +274,11 @@ def capture_snapshot(run_root: Path, protected: tuple[Path, ...] = ()) -> Path:
     for i, f in enumerate(f for base in _watched_roots(run_root, protected)
                           for f in _files_under(base)):
         name = f"{i:06d}"
-        shutil.copy2(f, blobs / name)
-        files[str(f.resolve())] = name
+        (blobs / name).write_bytes(_entry(f))
+        files[str(f.absolute())] = name
     (snap / "manifest.json").write_text(json.dumps({
-        "run_root": str(run_root.resolve()),
-        "protected": [str(p.resolve()) for p in protected],
+        "run_root": str(run_root.absolute()),
+        "protected": [str(p.absolute()) for p in protected],
         "files": files,
     }), encoding="utf-8")
     return snap
@@ -269,12 +299,12 @@ def enforce_from_snapshot(run_root: Path, snapshot_dir: Path,
         original = (blobs / blob).read_bytes()
         before[abs_str] = original
         p = Path(abs_str)
-        current = p.read_bytes() if p.is_file() else None
+        current = _entry(p) if (p.is_symlink() or p.is_file()) else None
         if current != original:
             changed.add(abs_str)
     for base in _watched_roots(run_root, protected):
         for f in _files_under(base):
-            key = str(f.resolve())
+            key = str(f.absolute())
             if key not in recorded:
                 before[key] = None
                 changed.add(key)

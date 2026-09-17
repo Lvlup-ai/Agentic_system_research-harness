@@ -7,6 +7,7 @@ checks what survived. Nothing here depends on an LLM.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -191,3 +192,49 @@ def test_cli_round_trip(tmp_path: Path, run_root: Path) -> None:
     assert result == {"ok": False, "violations": ["journal.md"], "restored": ["journal.md"]}
     assert (run_root / "journal.md").read_text() == "day 1\n"
     assert (run_root / "items" / "b_001" / "code.py").read_text() == "ok\n"
+
+
+# ── Symbolic links: the guard never follows one ─────────────────────────────
+
+def test_a_link_to_an_outside_file_is_removed_and_the_target_untouched(tmp_path: Path, run_root: Path) -> None:
+    outside = tmp_path / "precious.txt"
+    outside.write_text("precious\n")
+    with Guard(run_root, MATRIX, "proposer", {"item": "b_001"}) as g:
+        (run_root / "evil_link").symlink_to(outside)
+    assert g.result.violations == ("evil_link",)
+    assert g.result.restored == ("evil_link",)
+    assert not (run_root / "evil_link").is_symlink(), "the link is gone"
+    assert outside.read_text() == "precious\n", "the target was never touched"
+
+
+def test_a_link_inside_an_allowed_glob_is_kept_and_its_target_not_read(tmp_path: Path, run_root: Path) -> None:
+    outside = tmp_path / "precious.txt"
+    outside.write_text("precious\n")
+    with Guard(run_root, MATRIX, "proposer", {"item": "b_001"}) as g:
+        (run_root / "scratch").mkdir()
+        (run_root / "scratch" / "link").symlink_to(outside)
+    assert g.result.ok
+    assert outside.read_text() == "precious\n"
+
+
+def test_a_retargeted_link_is_restored_as_a_link(tmp_path: Path, run_root: Path) -> None:
+    a, b = tmp_path / "a.txt", tmp_path / "b.txt"
+    a.write_text("a"); b.write_text("b")
+    (run_root / "ref").symlink_to(a)
+    with Guard(run_root, MATRIX, "proposer", {"item": "b_001"}) as g:
+        (run_root / "ref").unlink()
+        (run_root / "ref").symlink_to(b)
+    assert g.result.violations == ("ref",)
+    assert (run_root / "ref").is_symlink() and Path(os.readlink(run_root / "ref")) == a
+    assert a.read_text() == "a" and b.read_text() == "b"
+
+
+def test_disk_snapshot_treats_links_the_same_way(tmp_path: Path, run_root: Path) -> None:
+    outside = tmp_path / "precious.txt"
+    outside.write_text("precious\n")
+    snap = capture_snapshot(run_root)
+    (run_root / "evil_link").symlink_to(outside)
+    result = enforce_from_snapshot(run_root, snap, MATRIX.globs("proposer", {"item": "b_001"}))
+    assert result.violations == ("evil_link",)
+    assert not (run_root / "evil_link").is_symlink()
+    assert outside.read_text() == "precious\n"
