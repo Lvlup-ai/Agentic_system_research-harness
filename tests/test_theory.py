@@ -104,6 +104,15 @@ def test_the_digest_ignores_formatting_but_not_content() -> None:
     assert c.digest() != a.digest()
 
 
+def test_lineage_changes_the_seal_but_not_the_formulation() -> None:
+    a = parse_note(NOTE)
+    b = parse_note({**NOTE, "builds_on": ["theory_00"], "caveats": "40 rows only"})
+    assert a.digest() != b.digest()
+    assert a.formulation_digest() == b.formulation_digest()
+    c = parse_note({**NOTE, "refutation": "Something else would refute it, at least ten words long."})
+    assert c.formulation_digest() != a.formulation_digest()
+
+
 # ── Verdict computation ──────────────────────────────────────────────────────
 
 def test_one_refutation_refutes() -> None:

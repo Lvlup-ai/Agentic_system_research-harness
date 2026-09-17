@@ -159,6 +159,11 @@ class Zone(BaseModel):
         return Verdict.UNDECIDED
 
 
+# Fields that describe where a note comes from, not what it claims. They are
+# part of the seal (the note as written) but not of the formulation (the theory).
+LINEAGE_FIELDS: tuple[str, ...] = ("builds_on", "caveats")
+
+
 class TheoryNote(BaseModel):
     """What the researcher writes before spending a trial. Strict: no extra fields."""
 
@@ -188,7 +193,21 @@ class TheoryNote(BaseModel):
                           ensure_ascii=False, separators=(",", ":"))
 
     def digest(self) -> str:
+        """The seal: the whole note, lineage included."""
         return hashlib.sha256(self.canonical().encode("utf-8")).hexdigest()
+
+    def formulation_digest(self) -> str:
+        """The theory itself, without its lineage.
+
+        Two notes with the same mechanism, prediction, zones, refutation,
+        measures and citations are the same theory, whatever they say they
+        build on. This is what "the same theory is not refuted twice" compares.
+        """
+        data = self.model_dump(mode="json")
+        for f in LINEAGE_FIELDS:
+            data.pop(f, None)
+        text = json.dumps(data, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def parse_note(raw: Mapping) -> TheoryNote:
