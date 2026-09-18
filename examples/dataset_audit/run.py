@@ -35,6 +35,7 @@ from pathlib import Path
 
 import yaml
 
+from agent_harness import journal
 from agent_harness.budget import Budget
 from agent_harness.jurisdiction import Guard, Matrix
 from agent_harness.ledger import Ledger
@@ -75,17 +76,27 @@ MATRIX = Matrix(
         "reviewer": ("review/*",),
     },
     protected=(HERE / "briefs", HERE / "library", IDEA),
+    ignore=("journal.jsonl",),      # the harness appends to it while an agent is guarded
 )
 
 
-def _say(trace: list[str], line: str, quiet: bool) -> None:
+def _say(trace: list[str], line: str, quiet: bool, subject: str | None = None) -> None:
+    """The orchestrator's narrative: printed, kept, and written to the journal as its note."""
     trace.append(line)
+    journal.note("orchestrator", line, subject=subject)
     if not quiet:
         print(line)
 
 
 def run(runs_root: Path, run_id: str = "example", quiet: bool = False) -> dict:
     """One full run. Returns a summary the tests assert on."""
+    try:
+        return _run(runs_root, run_id, quiet)
+    finally:
+        journal.deactivate()
+
+
+def _run(runs_root: Path, run_id: str, quiet: bool) -> dict:
     cfg = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
     trace: list[str] = []
     subject = dataset_id()
@@ -106,6 +117,7 @@ def run(runs_root: Path, run_id: str = "example", quiet: bool = False) -> dict:
                          tracks=idea.tracks)
     ctx = init_run(RunConfig(phases=tuple(cfg["phases"]), loop=LoopConfig(**cfg["loop"])),
                    runs_root, run_id)
+    journal.activate(ctx.root / "journal.jsonl")   # from here on, every harness call leaves a line
     idea.freeze(ctx.root)
     machine = PhaseMachine(ctx.state.phase(PHASE), ctx.config.loop)
     ledger.record(subject, "run", f"{run_id}: idea `{idea.title}`, budget {budget.total} "
@@ -139,7 +151,7 @@ def run(runs_root: Path, run_id: str = "example", quiet: bool = False) -> dict:
         if not g.result.ok:
             violations.extend(g.result.violations)
             _say(trace, f"[{n}] {item}: wrote outside its jurisdiction {g.result.violations}; "
-                        "restored, failure recorded", quiet)
+                        "restored, failure recorded", quiet, item)
             fail(FailureKind.JURISDICTION)
             continue
 
@@ -147,17 +159,19 @@ def run(runs_root: Path, run_id: str = "example", quiet: bool = False) -> dict:
         try:
             note = parse_note(json.loads(theory.note_path.read_text()))
         except (TheoryError, ValueError, OSError) as exc:
-            _say(trace, f"[{n}] {item}: note refused — {exc}", quiet)
+            _say(trace, f"[{n}] {item}: note refused — {exc}", quiet, item)
             fail(FailureKind.INVALID_OUTPUT)
             continue
 
         # clearance: knowledge, library and budget, all before any spending; stamped
+        journal.note("orchestrator", f"distance declared by the researcher: {meta['distance']} on track "
+                                     f"{note.track}; taken as declared, the auditor may contest it", subject=item)
         try:
             clear(theory, knowledge, library, budget, meta["distance"], passport)
         except Refused as exc:
             refused[item] = exc.cause
             _say(trace, f"[{n}] {item} ({note.track}, {meta['distance']}): refused before any spending — "
-                        f"{exc}", quiet)
+                        f"{exc}", quiet, item)
             fail(FailureKind.REFUSED)
             continue
 
@@ -171,7 +185,7 @@ def run(runs_root: Path, run_id: str = "example", quiet: bool = False) -> dict:
         directive = machine.record_audit(Audit(verdict))
         save_state(ctx)
         if directive is not Directive.EXECUTE:
-            _say(trace, f"[{n}] {item}: audit NO_GO — {position}", quiet)
+            _say(trace, f"[{n}] {item}: audit NO_GO — {position}", quiet, item)
             continue
 
         # seal, pay, measure, judge — each step requiring the previous stamp
@@ -193,7 +207,7 @@ def run(runs_root: Path, run_id: str = "example", quiet: bool = False) -> dict:
         save_state(ctx)
         _say(trace, f"[{n}] {item} ({note.track}, {meta['distance']}, cost {trial.cost}, seal {digest[:8]}): "
                     + ", ".join(f"{d.metric}={d.value}→{d.decision.value}" for d in decisions)
-                    + f" ⇒ {v.value}", quiet)
+                    + f" ⇒ {v.value}", quiet, item)
 
     budget.commit(runs_root / "budget")
     _say(trace, "budget: " + budget.summary(), quiet)
@@ -223,7 +237,7 @@ def run(runs_root: Path, run_id: str = "example", quiet: bool = False) -> dict:
         _say(trace, f"review {BOUNDARY}: {outcome.decision.value}"
                     + (f" (retry {outcome.retry_number}/{outcome.max_retries})" if outcome.retry_number else "")
                     + f" — {outcome.reason}; findings: "
-                    + (", ".join(f"{f.direction.value} {f.claim}" for f in findings) or "none"), quiet)
+                    + (", ".join(f"{f.direction.value} {f.claim}" for f in findings) or "none"), quiet, BOUNDARY)
         if outcome.decision is not Decision.RETRY:
             break
         for f in findings:
@@ -245,6 +259,13 @@ def run(runs_root: Path, run_id: str = "example", quiet: bool = False) -> dict:
     _say(trace, f"idea rewritten on {len(knowledge.entries)} theories → {rewrite_path.name}; "
                 f"ledger {ledger.total_lines()} lines", quiet)
 
+    # -- the journal, rendered for the end-of-run review -----------------------------
+    _say(trace, "run over; the journal is rendered to journal.md for the review", quiet)
+    j = journal.active()
+    assert j is not None
+    journal_lines = j.verify()                        # the chain, intact, last note included
+    (ctx.root / "journal.md").write_text(j.render(), encoding="utf-8")
+
     return {
         "run_root": str(ctx.root),
         "verdict": machine.state.verdict.value,
@@ -261,6 +282,7 @@ def run(runs_root: Path, run_id: str = "example", quiet: bool = False) -> dict:
         "lessons": list(knowledge.lessons()),
         "ledger_lines": ledger.total_lines(),
         "ledger_counts": ledger.counts(subject),
+        "journal_lines": journal_lines,
         "trace": trace,
     }
 

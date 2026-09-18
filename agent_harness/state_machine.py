@@ -48,6 +48,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agent_harness import journal
+
 __all__ = [
     "Audit",
     "Directive",
@@ -164,6 +166,8 @@ class PhaseState(BaseModel):
     verdict: Verdict | None = None
     accepted_ids: list[str] = Field(default_factory=list)
     rejected_ids: list[str] = Field(default_factory=list)
+    # Every failure with its kind and iteration: the record used to lose the kind.
+    failures: list[dict] = Field(default_factory=list)
 
     @property
     def best(self) -> float | None:
@@ -215,14 +219,19 @@ class PhaseMachine:
     def next_action(self) -> Directive:
         """Open an iteration, or say the phase is done."""
         self._accept(Event.NEXT_ACTION)
-        if self.state.verdict is not None:
+        st = self.state
+        if st.verdict is not None:
+            journal.emit("state.next_action", st.phase, directive=Directive.PHASE_DONE, verdict=st.verdict)
             return Directive.PHASE_DONE
-        if self.state.iteration >= self.config.max_iterations:
+        if st.iteration >= self.config.max_iterations:
             self._finish_at_cap()
+            journal.emit("state.next_action", st.phase, directive=Directive.PHASE_DONE, verdict=st.verdict,
+                         iteration=st.iteration)
             return Directive.PHASE_DONE
-        self.state.iteration += 1
-        self.state.consecutive_failures = 0
-        self.state.step = Step.PROPOSING
+        st.iteration += 1
+        st.consecutive_failures = 0
+        st.step = Step.PROPOSING
+        journal.emit("state.next_action", st.phase, directive=Directive.PROPOSE, iteration=st.iteration)
         return Directive.PROPOSE
 
     def record_audit(self, verdict: Audit) -> Directive:
@@ -230,13 +239,26 @@ class PhaseMachine:
         self._accept(Event.AUDIT)
         if verdict is Audit.GO:
             self.state.step = Step.EXECUTING
+            journal.emit("state.record_audit", self.state.phase, verdict=verdict, directive=Directive.EXECUTE,
+                         iteration=self.state.iteration)
             return Directive.EXECUTE
-        return self._register_failure()
+        d = self._register_failure()
+        self.state.failures.append({"iteration": self.state.iteration, "kind": "no_go"})
+        journal.emit("state.record_audit", self.state.phase, verdict=verdict, directive=d,
+                     iteration=self.state.iteration)
+        return d
 
     def record_failure(self, kind: FailureKind) -> Directive:
-        """A crash, a jurisdiction violation or an invalid deliverable counts like a NO_GO."""
+        """A crash, a jurisdiction violation, an invalid deliverable or a refusal counts like a NO_GO.
+
+        The kind is kept in the state: a review must see *why* an iteration failed.
+        """
         self._accept(Event.FAILURE)
-        return self._register_failure()
+        d = self._register_failure()
+        self.state.failures.append({"iteration": self.state.iteration, "kind": kind.value})
+        journal.emit("state.record_failure", self.state.phase, kind=kind, directive=d,
+                     iteration=self.state.iteration)
+        return d
 
     def record_result(self, accepted: bool, score: float, result_id: str) -> Directive:
         """A clean measurement. Only an *accepted* result can become the best.
@@ -264,8 +286,12 @@ class PhaseMachine:
                                       cfg.convergence_threshold_pct):
             st.verdict = Verdict.CONVERGED
             st.step = Step.DONE
+            journal.emit("state.record_result", st.phase, result_id=result_id, accepted=accepted, score=score,
+                         directive=Directive.PHASE_DONE, verdict=st.verdict, iteration=st.iteration)
             return Directive.PHASE_DONE
         st.step = Step.IDLE
+        journal.emit("state.record_result", st.phase, result_id=result_id, accepted=accepted, score=score,
+                     directive=Directive.NEXT_ITERATION, best_id=st.best_id, iteration=st.iteration)
         return Directive.NEXT_ITERATION
 
     # -- internals -----------------------------------------------------------
@@ -420,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--runs-root", type=Path, default=Path("runs"))
     common.add_argument("--run-id", required=True)
     common.add_argument("--phase", required=True)
+    journal.add_journal_argument(common)
 
     sub.add_parser("next-action", parents=[common])
     p_aud = sub.add_parser("record-audit", parents=[common])
@@ -446,6 +473,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.phase not in ctx.config.phases:
         print(json.dumps({"error": f"phase {args.phase!r} is not declared in this run"}))
         return 2
+    # The run root is known here: its journal is the default, no flag needed.
+    journal.activate(journal.resolve(args.journal).path if journal.resolve(args.journal) else ctx.root / "journal.jsonl")
     machine = PhaseMachine(ctx.state.phase(args.phase), ctx.config.loop)
     try:
         if args.cmd == "next-action":
@@ -458,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             directive = machine.record_result(args.accepted, args.score, args.result_id)
     except TransitionError as exc:
+        journal.emit("state.forbidden", args.phase, event=args.cmd, step=machine.state.step, detail=str(exc))
         print(json.dumps({"error": str(exc), "step": machine.state.step.value}))
         return 2  # nothing was saved: a forbidden event leaves no trace in the state
 

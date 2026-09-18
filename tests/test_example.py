@@ -65,6 +65,29 @@ def test_the_run_matches_its_documentation(tmp_path: Path) -> None:
     assert entries[0]["verdict"] == "refuted" and "2023 cut-off" in entries[0]["refuted_exactly"]
     assert any("predate 2023" in l for l in s["lessons"])
 
+    # the journal: every move of the orchestrator, written by the harness, chain intact
+    from agent_harness.journal import Journal
+    j = Journal(tmp_path / "t" / "journal.jsonl")
+    entries = j.entries()
+    assert len(entries) == s["journal_lines"] and len(entries) > 60
+    actions = [e["action"] for e in entries]
+    assert actions[0] == "idea.frozen" and "idea.rewritten" in actions
+    refusals = [(e["subject"], e["data"]["cause"]) for e in entries if e["action"] == "trial.refused"]
+    assert refusals == [("t-theory_03", "budget"), ("t-theory_05", "library"), ("t-theory_06", "knowledge")]
+    kinds = [e["data"]["kind"] for e in entries if e["action"] == "state.record_failure"]
+    assert kinds == ["refused", "refused", "refused", "jurisdiction"]
+    guard = [e for e in entries if e["action"] == "guard.enforce" and not e["data"]["ok"]]
+    assert len(guard) == 1 and guard[0]["data"]["violations"] == ["state.json"] and guard[0]["subject"] == "t-theory_08"
+    assert [e["data"]["decision"] for e in entries if e["action"] == "review.decided"] == ["RETRY", "PASS"]
+    assert any(e["action"] == "theory.integrity" and e["subject"] == "t-theory_07" for e in entries)
+    assert any(e["action"] == "note" and e["actor"] == "orchestrator" and "distance declared" in e["data"]["text"]
+               for e in entries)
+    assert state["phases"]["theories"]["failures"] == [
+        {"iteration": 3, "kind": "refused"}, {"iteration": 5, "kind": "refused"},
+        {"iteration": 6, "kind": "refused"}, {"iteration": 8, "kind": "jurisdiction"}]
+    rendered = (tmp_path / "t" / "journal.md").read_text()
+    assert rendered.startswith("# Run journal") and "## t-theory_07" in rendered and "chain intact" in rendered
+
     # the idea, frozen during the run and rewritten on the verdicts
     assert (tmp_path / "t" / "idea.frozen.json").exists()
     rewritten = (tmp_path / "t" / "idea_rewritten.md").read_text()

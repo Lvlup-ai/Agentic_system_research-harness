@@ -62,6 +62,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agent_harness import journal
 from agent_harness.research.theory import Theory, TheoryNote, Verdict, parse_note
 
 __all__ = [
@@ -242,6 +243,8 @@ class Knowledge:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(entry.model_dump_json() + "\n")
         self.entries.append(entry)
+        journal.emit("knowledge.recorded", entry.theory_id, verdict=verdict, track=note.track,
+                     refuted_exactly=entry.refuted_exactly, lessons=list(entry.lessons), run_id=run_id)
         return entry
 
 
@@ -255,6 +258,7 @@ def main(argv: list[str] | None = None) -> int:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--store", required=True, type=Path)
     common.add_argument("--subject", required=True)
+    journal.add_journal_argument(common)
 
     b = sub.add_parser("briefing", parents=[common]); b.add_argument("--track", default=None)
     sub.add_parser("tracks", parents=[common])
@@ -269,6 +273,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--passport", type=Path, default=None, help="default: <theory-dir>/passport.json")
 
     args = parser.parse_args(argv)
+    journal.activate_from_args(args)
     k = Knowledge(args.store, args.subject)
     try:
         if args.cmd == "briefing":

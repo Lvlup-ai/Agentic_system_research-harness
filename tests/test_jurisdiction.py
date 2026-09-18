@@ -238,3 +238,24 @@ def test_disk_snapshot_treats_links_the_same_way(tmp_path: Path, run_root: Path)
     assert result.violations == ("evil_link",)
     assert not (run_root / "evil_link").is_symlink()
     assert outside.read_text() == "precious\n"
+
+
+# ── Ignored paths: the run journal ──────────────────────────────────────────
+
+def test_an_ignored_path_is_neither_watched_nor_restored(run_root: Path) -> None:
+    matrix = Matrix(roles=MATRIX.roles, ignore=("journal.jsonl",))
+    (run_root / "journal.jsonl").write_text('{"n": 1}\n')
+    with Guard(run_root, matrix, "proposer", {"item": "b_001"}) as g:
+        with (run_root / "journal.jsonl").open("a") as f:
+            f.write('{"n": 2}\n')                 # the harness writes a line meanwhile
+        (run_root / "state.json").write_text("bad")
+    assert g.result.violations == ("state.json",)
+    assert (run_root / "journal.jsonl").read_text().count("\n") == 2, "the journal kept its line"
+
+
+def test_the_disk_snapshot_honours_the_ignore_list(run_root: Path) -> None:
+    (run_root / "journal.jsonl").write_text("")
+    snap = capture_snapshot(run_root, ignore=("journal.jsonl",))
+    (run_root / "journal.jsonl").write_text("appended\n")
+    result = enforce_from_snapshot(run_root, snap, MATRIX.globs("proposer", {"item": "b_001"}))
+    assert result.ok and (run_root / "journal.jsonl").read_text() == "appended\n"

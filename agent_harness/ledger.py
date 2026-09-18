@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_harness import journal
+
 __all__ = ["Ledger", "UnknownEvent"]
 
 _HEADER = (
@@ -86,6 +88,7 @@ class Ledger:
         line = f"| {stamp} | `{subject}` | {event} | {cell} |\n"
         with self.path.open("a", encoding="utf-8") as f:
             f.write(line)
+        journal.emit("ledger.recorded", subject, event=event, note=note)
         return line
 
     # -- reading -------------------------------------------------------------
@@ -140,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--path", required=True, type=Path)
     common.add_argument("--events", nargs="+", required=True, help="the closed vocabulary")
+    journal.add_journal_argument(common)
 
     rec = sub.add_parser("record", parents=[common])
     rec.add_argument("--subject", required=True)
@@ -150,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     cnt.add_argument("--subject", default=None)
 
     args = parser.parse_args(argv)
+    journal.activate_from_args(args)
     ledger = Ledger(args.path, tuple(args.events))
     if args.cmd == "record":
         try:

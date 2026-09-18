@@ -36,6 +36,9 @@ Semantics
   the whole subtree). ``{slot}`` placeholders are filled from ``slots``.
 * **Protected paths** are watched too, and nothing under them is writable by
   any agent. Use them for the harness code, the tests, the prompts.
+* **Ignored paths** are not watched at all: the run journal, which the
+  harness itself appends to while an agent is being guarded. Its integrity
+  is the journal's own hash chain, not this guard.
 * Restoration is exact: a modified or deleted file gets its original bytes
   back; an illegally created file is removed.
 * The guard never swallows an exception raised by the agent.
@@ -53,6 +56,8 @@ import tempfile
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from agent_harness import journal
 
 __all__ = [
     "Guard",
@@ -80,6 +85,7 @@ class Matrix:
 
     roles: Mapping[str, tuple[str, ...]]
     protected: tuple[Path, ...] = ()
+    ignore: tuple[str, ...] = ()      # run-root-relative globs the guard neither watches nor restores
 
     def globs(self, role: str, slots: Mapping[str, str] | None = None) -> tuple[str, ...]:
         """The role's globs with ``{slot}`` placeholders filled in.
@@ -135,13 +141,19 @@ def _entry(p: Path) -> bytes:
     return p.read_bytes()
 
 
-def _files_under(base: Path) -> Iterator[Path]:
+def _files_under(base: Path, run_root: Path | None = None, ignore: tuple[str, ...] = ()) -> Iterator[Path]:
     if base.is_symlink() or base.is_file():
-        yield base
+        entries = [base]
     elif base.is_dir():
-        for p in sorted(base.rglob("*")):     # rglob does not descend into linked directories
-            if p.is_symlink() or p.is_file():
-                yield p
+        entries = [p for p in sorted(base.rglob("*")) if p.is_symlink() or p.is_file()]  # no linked dirs
+    else:
+        entries = []
+    for p in entries:
+        if ignore and run_root is not None and _under(p, run_root):
+            rel = p.absolute().relative_to(run_root.absolute()).as_posix()
+            if any(fnmatch.fnmatchcase(rel, g) for g in ignore):
+                continue
+        yield p
 
 
 def _watched_roots(run_root: Path, protected: tuple[Path, ...]) -> list[Path]:
@@ -155,11 +167,12 @@ def _under(path: Path, root: Path) -> bool:
     return p == r or r in p.parents
 
 
-def snapshot(run_root: Path, protected: tuple[Path, ...] = ()) -> dict[str, bytes]:
+def snapshot(run_root: Path, protected: tuple[Path, ...] = (),
+             ignore: tuple[str, ...] = ()) -> dict[str, bytes]:
     """In-memory snapshot: absolute (lexical) path → entry bytes."""
     out: dict[str, bytes] = {}
     for base in _watched_roots(run_root, protected):
-        for f in _files_under(base):
+        for f in _files_under(base, run_root, ignore):
             out[str(f.absolute())] = _entry(f)
     return out
 
@@ -240,16 +253,19 @@ class Guard:
     _before: dict[str, bytes] = field(default_factory=dict, init=False, repr=False)
 
     def __enter__(self) -> "Guard":
-        self._before = snapshot(self.run_root, self.matrix.protected)
+        self._before = snapshot(self.run_root, self.matrix.protected, self.matrix.ignore)
         return self
 
     def __exit__(self, *exc: object) -> bool:
-        after = snapshot(self.run_root, self.matrix.protected)
+        after = snapshot(self.run_root, self.matrix.protected, self.matrix.ignore)
         changed = {k for k in set(self._before) | set(after)
                    if self._before.get(k) != after.get(k)}
         self.result = _restore(changed, self._before, self.run_root,
                                self.matrix.globs(self.role, self.slots),
                                self.matrix.protected)
+        journal.emit("guard.enforce", self.slots.get("item") if self.slots else None, role=self.role,
+                     ok=self.result.ok, violations=self.result.violations, restored=self.result.restored,
+                     agent_raised=exc[0].__name__ if exc and exc[0] else None)
         return False  # never hide the agent's exception
 
     def raise_on_violation(self) -> None:
@@ -261,7 +277,8 @@ class Guard:
 
 # ── Cross-process variant ────────────────────────────────────────────────────
 
-def capture_snapshot(run_root: Path, protected: tuple[Path, ...] = ()) -> Path:
+def capture_snapshot(run_root: Path, protected: tuple[Path, ...] = (),
+                     ignore: tuple[str, ...] = ()) -> Path:
     """Copy every watched file into a fresh system temp directory.
 
     Returns the snapshot directory. It is outside the run root on purpose: an
@@ -272,13 +289,14 @@ def capture_snapshot(run_root: Path, protected: tuple[Path, ...] = ()) -> Path:
     blobs.mkdir()
     files: dict[str, str] = {}
     for i, f in enumerate(f for base in _watched_roots(run_root, protected)
-                          for f in _files_under(base)):
+                          for f in _files_under(base, run_root, ignore)):
         name = f"{i:06d}"
         (blobs / name).write_bytes(_entry(f))
         files[str(f.absolute())] = name
     (snap / "manifest.json").write_text(json.dumps({
         "run_root": str(run_root.absolute()),
         "protected": [str(p.absolute()) for p in protected],
+        "ignore": list(ignore),
         "files": files,
     }), encoding="utf-8")
     return snap
@@ -292,6 +310,7 @@ def enforce_from_snapshot(run_root: Path, snapshot_dir: Path,
     manifest = json.loads((snapshot_dir / "manifest.json").read_text(encoding="utf-8"))
     blobs = snapshot_dir / "blobs"
     recorded: dict[str, str] = manifest["files"]
+    ignore = tuple(manifest.get("ignore", ()))
 
     before: dict[str, bytes | None] = {}
     changed: set[str] = set()
@@ -303,7 +322,7 @@ def enforce_from_snapshot(run_root: Path, snapshot_dir: Path,
         if current != original:
             changed.add(abs_str)
     for base in _watched_roots(run_root, protected):
-        for f in _files_under(base):
+        for f in _files_under(base, run_root, ignore):
             key = str(f.absolute())
             if key not in recorded:
                 before[key] = None
@@ -312,6 +331,7 @@ def enforce_from_snapshot(run_root: Path, snapshot_dir: Path,
     result = _restore(changed, before, run_root, globs, protected)
     if cleanup:
         shutil.rmtree(snapshot_dir, ignore_errors=True)
+    journal.emit("guard.enforce", None, ok=result.ok, violations=result.violations, restored=result.restored)
     return result
 
 
@@ -327,7 +347,8 @@ def _load_matrix(path: Path) -> Matrix:
         raw = json.loads(text)
     roles = {str(r): tuple(str(g) for g in gs) for r, gs in (raw.get("roles") or {}).items()}
     protected = tuple(Path(p) for p in (raw.get("protected") or []))
-    return Matrix(roles=roles, protected=protected)
+    ignore = tuple(str(g) for g in (raw.get("ignore") or []))
+    return Matrix(roles=roles, protected=protected, ignore=ignore)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -342,6 +363,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="YAML/JSON file with `roles` and `protected`.")
     common.add_argument("--protected", nargs="*", type=Path, default=[],
                         help="Extra protected paths (added to the matrix's).")
+    journal.add_journal_argument(common)
 
     sub.add_parser("capture", parents=[common], help="print the snapshot directory")
     enf = sub.add_parser("enforce", parents=[common], help="print a JSON result")
@@ -350,11 +372,12 @@ def main(argv: list[str] | None = None) -> int:
     enf.add_argument("--slot", action="append", default=[], metavar="NAME=VALUE")
 
     args = parser.parse_args(argv)
+    journal.activate_from_args(args)
     matrix = _load_matrix(args.matrix) if args.matrix else Matrix(roles={})
     protected = tuple(matrix.protected) + tuple(args.protected)
 
     if args.cmd == "capture":
-        print(capture_snapshot(args.run_root, protected))
+        print(capture_snapshot(args.run_root, protected, matrix.ignore))
         return 0
 
     slots = dict(s.split("=", 1) for s in args.slot)

@@ -42,6 +42,8 @@ from pathlib import Path
 
 import yaml
 
+from agent_harness import journal
+
 __all__ = [
     "Card",
     "CardError",
@@ -218,6 +220,7 @@ class Library:
             "from": card.status.value, "to": status.value, "reason": reason})
         card.path.write_text(_render(meta, body), encoding="utf-8")
         self.reload()
+        journal.emit("library.status", card_id, previous=card.status, status=status, reason=reason)
         return self.card(card_id)
 
     # -- the index -------------------------------------------------------------
@@ -259,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--dir", required=True, type=Path)
+    journal.add_journal_argument(common)
 
     sub.add_parser("index", parents=[common], help="regenerate the index")
     sub.add_parser("counts", parents=[common])
@@ -270,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     st.add_argument("--reason", required=True)
 
     args = parser.parse_args(argv)
+    journal.activate_from_args(args)
     try:
         lib = Library(args.dir)
         if args.cmd == "index":

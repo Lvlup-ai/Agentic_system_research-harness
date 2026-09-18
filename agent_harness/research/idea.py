@@ -38,6 +38,7 @@ from pathlib import Path
 
 import yaml
 
+from agent_harness import journal
 from agent_harness.research.knowledge import Knowledge
 from agent_harness.research.theory import Verdict
 
@@ -117,6 +118,7 @@ class Idea:
             "digest": self.digest(),
             "frozen_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }, indent=2, ensure_ascii=False), encoding="utf-8")
+        journal.emit("idea.frozen", "run", title=self.title, tracks=list(self.tracks), digest=self.digest())
         return marker
 
     def verify(self, run_root: Path) -> str:
@@ -125,6 +127,7 @@ class Idea:
             raise IdeaError(f"the idea was never frozen for this run ({marker} missing)")
         frozen = json.loads(marker.read_text(encoding="utf-8"))["digest"]
         if frozen != self.digest():
+            journal.emit("idea.moved", "run", frozen=frozen, now=self.digest())
             raise IdeaMoved(
                 f"the idea changed after the run started (frozen {frozen[:12]}…, now "
                 f"{self.digest()[:12]}…): a reference that moves cannot be drifted from")
@@ -175,6 +178,7 @@ class Idea:
         out = Path(out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(self.rewrite(knowledge, run_id), encoding="utf-8")
+        journal.emit("idea.rewritten", "run", out=out, theories=len(knowledge.entries), run_id=run_id)
         return out
 
 
@@ -187,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--idea", required=True, type=Path)
+    journal.add_journal_argument(common)
 
     sub.add_parser("load", parents=[common])
     f = sub.add_parser("freeze", parents=[common]); f.add_argument("--run-root", required=True, type=Path)
@@ -198,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--out", required=True, type=Path)
 
     args = parser.parse_args(argv)
+    journal.activate_from_args(args)
     try:
         idea = Idea.load(args.idea)
         if args.cmd == "load":

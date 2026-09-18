@@ -66,6 +66,8 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from agent_harness import journal
+
 __all__ = [
     "Budget",
     "BudgetExhausted",
@@ -171,6 +173,8 @@ class Budget:
             json.dumps({"subject": self.subject, "spent": spent,
                         "trials_total": self.trials_total()}, indent=2, sort_keys=True),
             encoding="utf-8")
+        journal.emit("budget.commit", None, subject_id=self.subject, reason=self.reason, spent=spent,
+                     trials_total=self.trials_total())
         return True
 
     # -- reading -------------------------------------------------------------
@@ -259,6 +263,8 @@ class Budget:
                   cost=self.costs[distance], compartment=compartment, track=track,
                   accepted=accepted, note=note)
         self.trials.append(t)
+        journal.emit("budget.consume", name, distance=distance, cost=t.cost, track=track,
+                     compartment=compartment, remaining=self.remaining(compartment), subject_id=self.subject)
         return t
 
     # -- reporting -----------------------------------------------------------
@@ -329,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--run-file", required=True, type=Path)
+    journal.add_journal_argument(common)
 
     i = sub.add_parser("init", parents=[common])
     i.add_argument("--store", required=True, type=Path)
@@ -355,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("commit", parents=[common])
 
     args = parser.parse_args(argv)
+    journal.activate_from_args(args)
     try:
         if args.cmd == "init":
             comps = dict((s.split("=", 1)[0], int(s.split("=", 1)[1])) for s in args.compartment)
@@ -368,6 +376,7 @@ def main(argv: list[str] | None = None) -> int:
         b, store = restore_run(args.run_file)
         if args.cmd == "check":
             ok, why = b.check(args.distance, args.compartment)
+            journal.emit("budget.check", None, distance=args.distance, compartment=args.compartment, ok=ok, reason=why)
             print(json.dumps({"ok": ok, "reason": why, "remaining": b.remaining(args.compartment)}))
             return 0 if ok else 2
         if args.cmd == "consume":

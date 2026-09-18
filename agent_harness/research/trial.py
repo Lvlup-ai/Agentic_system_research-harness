@@ -65,6 +65,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_harness import journal
 from agent_harness.budget import Budget, Trial, restore_run, save_run
 from agent_harness.research.knowledge import Knowledge
 from agent_harness.research.library import Library
@@ -242,21 +243,29 @@ def clear(theory: Theory, knowledge: Knowledge, library: Library, budget: Budget
     """Knowledge, library and budget say yes to this note, as it is now. Stamps ``cleared``."""
     note = theory.note()
     try:
-        knowledge.check_note(note)
-    except ValueError as exc:
-        raise Refused("knowledge", str(exc)) from exc
-    try:
-        report = library.require_citations(note.cites)
-    except ValueError as exc:
-        raise Refused("library", str(exc)) from exc
-    if report.needs_extension and not note.caveats.strip():
-        raise Refused("library", f"card(s) {list(report.needs_extension)} need a declared "
-                                 "approximation in the note's caveats")
-    ok, why = budget.check(distance)
-    if not ok:
-        raise Refused("budget", why)
-    return passport.stamp("cleared", note.digest(), distance=distance, track=note.track,
-                          cites=list(note.cites), needs_extension=list(report.needs_extension))
+        try:
+            knowledge.check_note(note)
+        except ValueError as exc:
+            raise Refused("knowledge", str(exc)) from exc
+        try:
+            report = library.require_citations(note.cites)
+        except ValueError as exc:
+            raise Refused("library", str(exc)) from exc
+        if report.needs_extension and not note.caveats.strip():
+            raise Refused("library", f"card(s) {list(report.needs_extension)} need a declared "
+                                     "approximation in the note's caveats")
+        ok, why = budget.check(distance)
+        if not ok:
+            raise Refused("budget", why)
+    except Refused as exc:
+        journal.emit("trial.refused", theory.dir.name, cause=exc.cause, detail=exc.detail,
+                     distance=distance, track=note.track)
+        raise
+    stamp = passport.stamp("cleared", note.digest(), distance=distance, track=note.track,
+                           cites=list(note.cites), needs_extension=list(report.needs_extension))
+    journal.emit("trial.cleared", theory.dir.name, distance=distance, track=note.track,
+                 cites=list(note.cites), digest=note.digest())
+    return stamp
 
 
 def consume(theory: Theory, budget: Budget, passport: Passport,
@@ -273,6 +282,7 @@ def consume(theory: Theory, budget: Budget, passport: Passport,
     trial = budget.consume(theory.dir.name, distance, track=cleared["data"].get("track"),
                            accepted=accepted, note=note)
     passport.stamp("consumed", digest, distance=distance, cost=trial.cost, n=trial.n)
+    journal.emit("trial.consumed", theory.dir.name, distance=distance, cost=trial.cost, remaining=budget.remaining())
     return trial
 
 
@@ -288,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--secret-file", required=True, type=Path)
     common.add_argument("--passport", type=Path, default=None, help="default: <dir>/passport.json")
     common.add_argument("--budget-run-file", required=True, type=Path)
+    journal.add_journal_argument(common)
 
     c = sub.add_parser("clear", parents=[common])
     c.add_argument("--distance", required=True)
@@ -302,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("status", parents=[common])
 
     args = parser.parse_args(argv)
+    journal.activate_from_args(args)
     try:
         theory = Theory(args.dir)
         passport = Passport(args.passport or args.dir / "passport.json", args.dir.name,

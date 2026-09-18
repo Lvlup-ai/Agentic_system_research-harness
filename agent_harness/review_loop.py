@@ -65,6 +65,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from agent_harness import journal
 from agent_harness.budget import Budget
 from agent_harness.ledger import Ledger
 
@@ -168,12 +169,25 @@ class Review:
         try:
             requested = Decision(decision)
         except ValueError as exc:
+            journal.emit("review.malformed", self.state.boundary, decision=str(decision), detail=str(exc))
             raise ReviewError(
                 f"unknown decision {decision!r}; allowed: {[d.value for d in Decision]}") from exc
         findings = tuple(findings)
         redo = tuple(r for r in redo if r.strip())
         against = [f for f in findings if f.direction is Direction.AGAINST]
+        try:
+            outcome = self._decide(requested, findings, redo, reason, against)
+        except ReviewError as exc:
+            journal.emit("review.malformed", self.state.boundary, decision=requested, detail=str(exc))
+            raise
+        self.state.history.append(outcome.to_dict())
+        journal.emit("review.decided", self.state.boundary, requested=requested, decision=outcome.decision,
+                     converted=outcome.converted, retry_number=outcome.retry_number, reason=outcome.reason,
+                     findings=[f.to_dict() for f in findings], redo=list(redo))
+        return outcome
 
+    def _decide(self, requested: Decision, findings: tuple[Finding, ...], redo: tuple[str, ...],
+                reason: str, against: list[Finding]) -> ReviewOutcome:
         if requested is Decision.PASS:
             if against and not reason.strip():
                 raise ReviewError(
@@ -195,8 +209,6 @@ class Review:
             if not redo:
                 raise ReviewError("a RETRY must list what to redo (never how)")
             outcome = self._retry(requested, findings, redo, reason)
-
-        self.state.history.append(outcome.to_dict())
         return outcome
 
     def _retry(self, requested: Decision, findings: tuple[Finding, ...],
@@ -248,7 +260,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ledger", type=Path, default=None)
     parser.add_argument("--ledger-events", nargs="*", default=["retry"])
     parser.add_argument("--subject", default="")
+    journal.add_journal_argument(parser)
     args = parser.parse_args(argv)
+    journal.activate_from_args(args)
 
     if args.state_file.exists():
         state = BoundaryState.model_validate_json(args.state_file.read_text(encoding="utf-8"))

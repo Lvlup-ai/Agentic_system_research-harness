@@ -48,6 +48,8 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, ValidationError
 
+from agent_harness import journal
+
 __all__ = [
     "Check",
     "ContractError",
@@ -180,9 +182,15 @@ class Registry:
         return obj
 
     def load(self, path: Path) -> Deliverable:
-        if not path.exists():
-            raise DeliverableMissing(f"deliverable not found: {path}")
-        return self.loads(path.read_text(encoding="utf-8"), origin=str(path))
+        try:
+            if not path.exists():
+                raise DeliverableMissing(f"deliverable not found: {path}")
+            obj = self.loads(path.read_text(encoding="utf-8"), origin=str(path))
+        except ContractError as exc:
+            journal.emit("contract.refused", None, path=path, error=type(exc).__name__, detail=str(exc))
+            raise
+        journal.emit("contract.loaded", None, path=path, contract=obj.contract)
+        return obj
 
     # -- writing -------------------------------------------------------------
 
@@ -204,6 +212,7 @@ class Registry:
     def dump(self, obj: Deliverable, path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.dumps(obj) + "\n", encoding="utf-8")
+        journal.emit("contract.written", None, path=path, contract=obj.contract)
         return path
 
 

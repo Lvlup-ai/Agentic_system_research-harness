@@ -70,6 +70,7 @@ writes a state file, never picks a verdict, never decides a retry.
 | [`contracts`](agent_harness/contracts.py) | Versioned deliverable contracts with a validating loader: unknown version, truncated payload, unknown field or a summary that contradicts its rows are refused. |
 | [`review_loop`](agent_harness/review_loop.py) | The bounded adversarial loop: PASS / RETRY / ESCALATE. A RETRY needs a finding *against* the result; beyond the cap it becomes an ESCALATE. |
 | [`prompt_tests`](agent_harness/prompt_tests.py) | Tests that check an agent brief tells the truth about the repository: counts, quoted thresholds, named tools, stale phrases. |
+| [`journal`](agent_harness/journal.py) | The run journal: every move of the orchestrator, written by the harness itself when a module acts, plus the orchestrator's notes in its own words. Hash-chained, so an edited or removed line shows; rendered in Markdown for the end-of-run review. It prevents nothing; it makes everything reviewable. |
 
 Every module has a CLI, so an orchestrating LLM can drive it from a shell:
 a refusal is a JSON line and exit code 2 (`prompt_tests` and `library
@@ -84,6 +85,14 @@ with it, `seal` and `measure` refuse a note that was not cleared and a trial
 that was not paid. Without it (`--unguarded`, or the Python API called
 without a passport), the sequence is the caller's discipline, and the
 harness says so.
+
+What is deliberately *not* enforced: the orchestrator's latitude. It declares
+distances, abandons iterations, arbitrates disagreements, chooses what to
+measure. That latitude is acceptable because every one of those moves is
+written: with a journal active (`--journal`, or `AGENT_HARNESS_JOURNAL` set
+once), each module writes its line when it acts, refusals carry the module
+that said no, failures keep their kind, and the orchestrator writes its
+reasons with `journal note`. The end-of-run review reads `journal render`.
 
 ## Quickstart
 
@@ -118,6 +127,7 @@ it. The secret file lives outside every run root and outside every path an
 agent can read; `runs/r1/budget.json` is the run's budget state:
 
 ```bash
+export AGENT_HARNESS_JOURNAL=runs/r1/journal.jsonl
 python -m agent_harness.research.idea freeze --idea idea.md --run-root runs/r1
 python -m agent_harness.budget init --run-file runs/r1/budget.json --store budget --subject s --reason first_pass --total 12 --track email
 python -m agent_harness.research.knowledge briefing --store knowledge --subject s --track email
@@ -130,7 +140,12 @@ python -m agent_harness.research.trial consume --dir runs/r1/theories/t01 --secr
 python -m agent_harness.research.theory measure --dir runs/r1/theories/t01 --secret-file .secret --values values.json
 python -m agent_harness.research.knowledge record --store knowledge --subject s --theory-dir runs/r1/theories/t01 --run-id r1 --secret-file .secret
 python -m agent_harness.budget commit --run-file runs/r1/budget.json
+python -m agent_harness.journal note --actor orchestrator --subject t01 --text "in scope: the email track is the idea's first track; measured as declared"
+python -m agent_harness.journal verify
 ```
+
+Every command above left its line in `runs/r1/journal.jsonl`; `python -m
+agent_harness.journal render` turns it into the chronology a reviewer reads.
 
 Skip `trial clear` and `seal` is refused; skip `trial consume` and `measure`
 is refused; measure twice and the second is refused; edit a stamp and every
@@ -146,14 +161,17 @@ replayed by the test suite.
   during the run.
 - A theory is written before its measurement, judged by what it declared,
   and measured once.
-- A refused event leaves no trace. A recorded one is never rewritten.
+- A refused event leaves no trace in the state. A recorded one is never
+  rewritten. Both leave a line in the journal.
 - The order of the protocol is a fact the harness checks (the passport),
   not a discipline of the orchestrator.
+- The orchestrator is free to decide, and every decision is written where a
+  reviewer will read it.
 - A prompt is a document that nothing compiles. Here, prompts are tested.
 
 ## Status and roadmap
 
-Early. The twelve modules above are complete and tested; the API may still
+Early. The thirteen modules above are complete and tested; the API may still
 move. Known limits, stated rather than hidden: the guard only watches the
 roots it is given, so an agent with shell access can write elsewhere; the
 measured values come from whoever runs the measurement; a run's `config.json`

@@ -8,7 +8,9 @@ the CLIs fails here, not in a reader's terminal.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -47,10 +49,15 @@ def test_the_readme_shell_sequence_runs_as_written(tmp_path: Path) -> None:
 
     commands = readme_shell_commands()
     assert len(commands) >= 10
+    env = dict(os.environ)
     for cmd in commands:
+        if cmd.startswith("export "):
+            key, _, value = cmd[len("export "):].partition("=")
+            env[key] = value
+            continue
         assert cmd.startswith("python -m agent_harness."), cmd
-        argv = [sys.executable, *cmd.split()[1:]]
-        proc = subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True)
+        argv = [sys.executable, *shlex.split(cmd)[1:]]     # quoted arguments stay whole
+        proc = subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, env=env)
         assert proc.returncode == 0, f"{cmd}\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
         out = json.loads(proc.stdout)
         assert out.get("ok", True) is True, cmd
@@ -61,3 +68,10 @@ def test_the_readme_shell_sequence_runs_as_written(tmp_path: Path) -> None:
     assert steps == ["cleared", "sealed", "consumed", "measured"]
     assert (tmp_path / "knowledge" / "s.jsonl").exists()
     assert json.loads((tmp_path / "budget" / "s.json").read_text())["spent"] == {"_": 1}
+    # every command left its line in the journal named by the environment
+    from agent_harness.journal import Journal
+    entries = Journal(tmp_path / "runs" / "r1" / "journal.jsonl").entries()
+    actions = [e["action"] for e in entries]
+    for expected in ("idea.frozen", "trial.cleared", "theory.sealed", "trial.consumed", "theory.measured",
+                     "knowledge.recorded", "budget.commit", "note"):
+        assert expected in actions, expected

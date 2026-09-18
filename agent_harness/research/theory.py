@@ -65,6 +65,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from agent_harness import journal
+
 __all__ = [
     "AlreadyMeasured",
     "AlreadySealed",
@@ -391,6 +393,8 @@ class Theory:
             self.note_path.read_text(encoding="utf-8"), encoding="utf-8")
         self.note_path.write_text(json.dumps(note.model_dump(mode="json"), indent=2,
                                              ensure_ascii=False), encoding="utf-8")
+        changed = sorted(k for k in note.model_dump() if note.model_dump()[k] != current.model_dump()[k])
+        journal.emit("theory.amended", self.dir.name, version=self.version, changed=changed)
         return note
 
     def record_exchange(self, role: str, position: str) -> Exchange:
@@ -404,6 +408,7 @@ class Theory:
         self.exchange_path.write_text(
             json.dumps([e.model_dump() for e in entries], indent=2, ensure_ascii=False),
             encoding="utf-8")
+        journal.emit("theory.exchange", self.dir.name, actor=role, position=position, note_version=self.version)
         return entry
 
     def seal(self, passport=None) -> str:
@@ -431,6 +436,8 @@ class Theory:
             "note": note.model_dump(mode="json")}, indent=2, ensure_ascii=False))
         if passport is not None:
             passport.stamp("sealed", digest)
+        journal.emit("theory.sealed", self.dir.name, digest=digest, version=self.version,
+                     track=note.track, guarded=passport is not None)
         return digest
 
     def sealed_note(self) -> TheoryNote:
@@ -443,6 +450,7 @@ class Theory:
         note = self.sealed_note()
         _write_atomic(self.note_path, json.dumps(note.model_dump(mode="json"), indent=2,
                                                  ensure_ascii=False))
+        journal.emit("theory.restored", self.dir.name, digest=self.seal_digest())
         return note
 
     def verify(self) -> str:
@@ -493,6 +501,8 @@ class Theory:
         }, indent=2))
         if passport is not None:
             passport.stamp("measured", digest, verdict=verdict.value)
+        journal.emit("theory.measured", self.dir.name, verdict=verdict, values=dict(values),
+                     decisions=[d.model_dump() for d in decisions], guarded=passport is not None)
         return verdict, decisions
 
     def verdict(self) -> Verdict | None:
@@ -508,17 +518,26 @@ class Theory:
         try:
             self.verify()
         except NotSealed:
-            return Finding(Direction.AGAINST, f"{self.dir.name}: measured without a seal",
-                           "no seal.json next to the note")
+            f = Finding(Direction.AGAINST, f"{self.dir.name}: measured without a seal",
+                        "no seal.json next to the note")
         except TamperedNote as exc:
             if not self.sealed:
-                return Finding(Direction.AGAINST, f"{self.dir.name}: seal removed after the measurement",
-                               f"{exc}; the seal is gone")
-            sealed, now = self.sealed_note().model_dump(), self.note().model_dump()
-            changed = sorted(k for k in now if now[k] != sealed.get(k))
-            return Finding(Direction.AGAINST, f"{self.dir.name}: note reworded after its seal",
-                           f"field(s) changed since the seal: {changed}" if changed else str(exc))
-        return None
+                f = Finding(Direction.AGAINST, f"{self.dir.name}: seal removed after the measurement",
+                            f"{exc}; the seal is gone")
+            else:
+                try:
+                    sealed, now = self.sealed_note().model_dump(), self.note().model_dump()
+                    changed = sorted(k for k in now if now[k] != sealed.get(k))
+                    detail = f"field(s) changed since the seal: {changed}" if changed else str(exc)
+                except TheoryError as inner:      # the note is no longer even a note
+                    detail = f"the note is no longer readable as a note: {inner}"
+                f = Finding(Direction.AGAINST, f"{self.dir.name}: note reworded after its seal", detail)
+        except (TheoryError, ValueError) as exc:     # unreadable note: a finding, never a crash
+            f = Finding(Direction.AGAINST, f"{self.dir.name}: note unreadable after its seal", str(exc))
+        else:
+            return None
+        journal.emit("theory.integrity", self.dir.name, claim=f.claim, evidence=f.evidence)
+        return f
 
     def summary(self) -> dict:
         note = self.note() if self.exists else None
@@ -542,6 +561,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--dir", required=True, type=Path)
+    journal.add_journal_argument(common)
 
     d = sub.add_parser("draft", parents=[common]); d.add_argument("--note", required=True, type=Path)
     a = sub.add_parser("amend", parents=[common]); a.add_argument("--note", required=True, type=Path)
@@ -560,6 +580,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", parents=[common])
 
     args = parser.parse_args(argv)
+    journal.activate_from_args(args)
     theory = Theory(args.dir)
     passport = None
     if args.cmd in ("seal", "measure"):
@@ -595,6 +616,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             out = {"ok": True, **theory.summary()}
     except (TheoryError, ValueError, OSError) as exc:
+        journal.emit("theory.refused", args.dir.name, command=args.cmd, error=type(exc).__name__, detail=str(exc))
         print(json.dumps({"ok": False, "error": type(exc).__name__, "detail": str(exc)},
                          ensure_ascii=False))
         return 2

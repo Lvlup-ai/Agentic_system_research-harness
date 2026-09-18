@@ -58,9 +58,12 @@ Everything lands under `examples/dataset_audit/runs/<run id>/`: `state.json`
 theory with `note.json`, `measurement.json`, `audit.md`, `exchange.json`,
 `passport.json` (the four stamps: cleared, sealed, consumed, measured),
 `seal.json`, `measure.json` and `verdict.json`, then `report.json`,
-`review/` and `idea_rewritten.md`. Next to the runs, and persisting across
-them: `knowledge/<subject>.jsonl`, `budget/<subject>.json`, `ledger.md`, and
-`.harness_secret`, the key of the stamps, which no agent reads.
+`review/`, `idea_rewritten.md`, and the run's **journal**: `journal.jsonl`,
+one hash-chained line per move of the harness and per note of the
+orchestrator, rendered as `journal.md` for the end-of-run review. Next to
+the runs, and persisting across them: `knowledge/<subject>.jsonl`,
+`budget/<subject>.json`, `ledger.md`, and `.harness_secret`, the key of the
+stamps, which no agent reads.
 
 ## Run it twice
 
